@@ -268,6 +268,26 @@ export const groupsAPI = {
     return await apiClient.get(`/api/groups/${groupId}/batch-progress`, {
       params: { batch_task_id: batchTaskId }
     })
+  },
+
+  /**
+   * 校验图像组中的 segments
+   * @param {string} groupId - 组ID
+   * @param {Object} data - 校验数据 { image_id }
+   * @returns {Promise<Object>} 校验结果
+   */
+  async validateSegments(groupId, data) {
+    return await apiClient.put(`/api/groups/${groupId}/segments/validate`, data)
+  },
+
+  /**
+   * 导出图像组数据
+   * @param {string} groupId - 组ID
+   * @param {Object} config - 导出配置 { format, include_images }
+   * @returns {Promise<Object>} 导出结果
+   */
+  async exportGroup(groupId, config) {
+    return await apiClient.post(`/api/groups/${groupId}/export`, config)
   }
 }
 

@@ -89,7 +89,7 @@
             <el-tag>原始图像</el-tag>
           </div>
           <div class="image-preview">
-            <img :src="selectedNode.url" :alt="selectedNode.filename" />
+            <img :src="getFullUrl(selectedNode.url)" :alt="selectedNode.filename" />
           </div>
           <el-descriptions :column="2" border>
             <el-descriptions-item label="文件名">{{ selectedNode.filename }}</el-descriptions-item>
@@ -175,11 +175,33 @@
         </div>
       </div>
     </div>
+
+    <!-- 编辑图像组对话框 -->
+    <el-dialog v-model="showEditDialog" title="编辑图像组信息" width="500px">
+      <el-form :model="editForm" label-width="100px">
+        <el-form-item label="组名称"><el-input v-model="editForm.name" /></el-form-item>
+        <el-form-item label="描述"><el-input v-model="editForm.description" type="textarea" /></el-form-item>
+        <el-form-item label="出土地点"><el-input v-model="editForm.source_site" /></el-form-item>
+        <el-form-item label="时代断代"><el-input v-model="editForm.period" /></el-form-item>
+        <el-form-item label="材质">
+          <el-select v-model="editForm.material">
+            <el-option label="竹" value="竹" />
+            <el-option label="木" value="木" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="收藏机构"><el-input v-model="editForm.collection" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showEditDialog = false">取消</el-button>
+        <el-button type="primary" @click="handleSaveEdit">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   FolderOpened,
@@ -191,10 +213,24 @@ import { groupsAPI } from '@/api/groups'
 import { metadataAPI } from '@/api/metadata'
 import { handleApiError } from '@/utils/errorHandler'
 
+const API_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL || 'http://127.0.0.1:8000'
+
+const route = useRoute()
 const treeRef = ref(null)
 const groups = ref([])
 const selectedNode = ref(null)
 const treeData = ref([])
+
+// 编辑对话框状态
+const showEditDialog = ref(false)
+const editForm = ref({
+  name: '',
+  description: '',
+  source_site: '',
+  period: '',
+  material: '',
+  collection: ''
+})
 
 // 元数据表单
 const slipMetadataForm = ref({
@@ -222,8 +258,8 @@ const treeProps = {
 
 const loadGroups = async () => {
   try {
-    const response = await groupsAPI.getGroups()
-    groups.value = response.data
+    const data = await groupsAPI.getGroups()
+    groups.value = data || []
 
     // 构建树形数据
     treeData.value = groups.value.map(group => ({
@@ -278,7 +314,7 @@ const handleNodeClick = async (data) => {
       const groupId = data.id.replace('images-', '')
       try {
         const response = await groupsAPI.getGroupImages(groupId)
-        const images = response.data?.images || response.data || []
+        const images = response.items || []
         data.children = images.map(img => ({
           id: `image-${img.id}`,
           type: 'image',
@@ -302,7 +338,7 @@ const handleNodeClick = async (data) => {
       const groupId = data.id.replace('slips-', '')
       try {
         const response = await groupsAPI.getGroupSegments(groupId, { type: 'slip' })
-        const slips = response.data || []
+        const slips = response || []
         data.children = slips.map(slip => ({
           id: `slip-${slip.id}`,
           type: 'slip',
@@ -332,7 +368,7 @@ const handleNodeClick = async (data) => {
       const groupId = data.id.split('-')[1]
       try {
         const response = await groupsAPI.getGroupSegments(groupId, { type: 'char' })
-        const chars = (response.data || []).filter(c => c.source_image_id === slipId)
+        const chars = (response || []).filter(c => c.source_image_id === slipId)
         data.children = chars.map(char => ({
           id: `char-${char.id}`,
           type: 'char',
@@ -355,12 +391,58 @@ const handleNodeClick = async (data) => {
   }
 }
 
-const handleExportGroup = () => {
-  ElMessage.info('导出功能开发中')
+const handleExportGroup = async () => {
+  if (!selectedNode.value || selectedNode.value.type !== 'group') return
+  const groupId = selectedNode.value.id.replace('group-', '')
+
+  try {
+    const result = await ElMessageBox.confirm(
+      '选择导出格式',
+      '导出数据',
+      {
+        distinguishCancelAndClose: true,
+        confirmButtonText: 'MSJ 格式',
+        cancelButtonText: 'COCO 格式'
+      }
+    )
+    const format = result === 'confirm' ? 'msj' : 'coco'
+
+    const response = await groupsAPI.exportGroup(groupId, { format, include_images: true })
+    ElMessage.success(`导出成功，格式: ${format}`)
+
+    if (response.file_url) {
+      window.open(`${API_BASE_URL}${response.file_url}`, '_blank')
+    }
+  } catch (e) {
+    if (e !== 'cancel') handleApiError(e, '导出失败')
+  }
 }
 
 const handleEditGroup = () => {
-  ElMessage.info('编辑功能开发中')
+  if (!selectedNode.value || selectedNode.value.type !== 'group') return
+  Object.assign(editForm.value, {
+    name: selectedNode.value.name,
+    description: selectedNode.value.description,
+    source_site: selectedNode.value.source_site,
+    period: selectedNode.value.period,
+    material: selectedNode.value.material,
+    collection: selectedNode.value.collection
+  })
+  showEditDialog.value = true
+}
+
+const handleSaveEdit = async () => {
+  if (!selectedNode.value) return
+  const groupId = selectedNode.value.id.replace('group-', '')
+  try {
+    await groupsAPI.updateGroup(groupId, editForm.value)
+    Object.assign(selectedNode.value, editForm.value)
+    showEditDialog.value = false
+    ElMessage.success('已保存')
+    await loadGroups()
+  } catch (e) {
+    handleApiError(e, '保存失败')
+  }
 }
 
 const handleSaveMetadata = () => {
@@ -415,8 +497,24 @@ const formatFileSize = (bytes) => {
   return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
 }
 
-onMounted(() => {
-  loadGroups()
+const getFullUrl = (path) => {
+  if (!path) return ''
+  if (path.startsWith('http://') || path.startsWith('https://')) return path
+  return `${API_BASE_URL}${path}`
+}
+
+onMounted(async () => {
+  await loadGroups()
+
+  // 从 query 预选组
+  const queryGroupId = route.query.groupId
+  if (queryGroupId && treeRef.value) {
+    const targetNode = treeData.value.find(n => n.id === `group-${queryGroupId}`)
+    if (targetNode) {
+      selectedNode.value = targetNode
+      treeRef.value.setCurrentKey(targetNode.id)
+    }
+  }
 })
 </script>
 

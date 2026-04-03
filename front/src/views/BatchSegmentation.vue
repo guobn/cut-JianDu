@@ -64,6 +64,7 @@
               :color="getProgressColor"
             />
             <span>{{ progress.completed }}/{{ progress.total }} 张</span>
+            <span v-if="progress.failed > 0" style="color:#F56C6C">失败: {{ progress.failed }}</span>
           </div>
           <div v-if="progress.current_file" class="current-file">
             <p>处理中：{{ progress.current_file }}</p>
@@ -88,6 +89,7 @@
 
       <!-- Tab 2: 单字切割 -->
       <el-tab-pane label="单字切割" name="char">
+        <el-alert v-if="!slipSegmentDone" type="warning" title="请先完成单支切割和校验后，再进行单字切割" :closable="false" />
         <div class="batch-mode">
           <!-- 左侧：图像组选择器 -->
           <div class="batch-left">
@@ -130,7 +132,7 @@
             <el-button
               type="primary"
               class="start-btn"
-              :disabled="!selectedGroupId || processing"
+              :disabled="!selectedGroupId || processing || !slipSegmentDone"
               :loading="processing"
               @click="handleStartSegment('char')"
             >
@@ -149,6 +151,7 @@
               :color="getProgressColor"
             />
             <span>{{ progress.completed }}/{{ progress.total }} 张</span>
+            <span v-if="progress.failed > 0" style="color:#F56C6C">失败: {{ progress.failed }}</span>
           </div>
           <div v-if="progress.current_file" class="current-file">
             <p>处理中：{{ progress.current_file }}</p>
@@ -176,14 +179,14 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useGroupStore } from '@/store/group'
 import { groupsAPI } from '@/api/groups'
-import { recognitionAPI } from '@/api/recognition'
 import { handleApiError } from '@/utils/errorHandler'
 
 const router = useRouter()
+const route = useRoute()
 const groupStore = useGroupStore()
 
 // 状态
@@ -193,23 +196,20 @@ const groups = ref([])
 const processing = ref(false)
 const processComplete = ref(false)
 const currentMode = ref(null)
+const slipSegmentDone = ref(false)   // 新增：单支切割+校验已完成标志
 
 // 进度
 const progress = ref({
   total: 0,
   completed: 0,
+  failed: 0,
   current_file: null,
   status: 'idle'
 })
 
 // 计算属性
-const selectedGroup = computed(() => {
-  return groups.value.find(g => g.id === selectedGroupId.value)
-})
-
-const availableGroups = computed(() => {
-  return groups.value.filter(g => g.status !== 'exported')
-})
+const selectedGroup = computed(() => groups.value.find(g => g.id === selectedGroupId.value))
+const availableGroups = computed(() => groups.value.filter(g => g.status !== 'exported'))
 
 const getProgressColor = (percentage) => {
   if (percentage < 50) return '#E6A23C'
@@ -217,7 +217,7 @@ const getProgressColor = (percentage) => {
   return '#67C23A'
 }
 
-// 方法
+// 加载组列表
 const loadGroups = async () => {
   try {
     const data = await groupsAPI.getGroups()
@@ -229,48 +229,72 @@ const loadGroups = async () => {
 
 const handleGroupChange = () => {
   processComplete.value = false
-  progress.value = { total: 0, completed: 0, current_file: null, status: 'idle' }
+  progress.value = { total: 0, completed: 0, failed: 0, current_file: null, status: 'idle' }
 }
 
+// 核心：启动切割任务
 const handleStartSegment = async (mode) => {
   if (!selectedGroupId.value) return
 
+  // 单字切割前检查单支是否已完成
+  if (mode === 'char' && !slipSegmentDone.value) {
+    ElMessage.warning('请先完成单支切割和校验')
+    return
+  }
+
   processing.value = true
   currentMode.value = mode
+  processComplete.value = false
+
   try {
+    let response
     if (mode === 'slip') {
-      await recognitionAPI.batchDetectSlips(selectedGroupId.value)
+      response = await groupsAPI.segmentSlips(selectedGroupId.value, {})
     } else {
-      await recognitionAPI.batchDetectChars(selectedGroupId.value)
+      response = await groupsAPI.segmentChars(selectedGroupId.value, {})
     }
 
-    pollProgress(mode)
+    const batchTaskId = response.batch_task_id
+    if (!batchTaskId) {
+      throw new Error('未获取到 batch_task_id')
+    }
+
+    // 开始轮询
+    pollProgress(mode, batchTaskId)
   } catch (error) {
     handleApiError(error, '启动切割失败')
     processing.value = false
   }
 }
 
-const pollProgress = async (mode) => {
+// 轮询进度（使用 batch_task_id）
+const pollProgress = (mode, batchTaskId) => {
   const pollInterval = setInterval(async () => {
     try {
-      const response = await groupsAPI.getProgress(selectedGroupId.value)
-      progress.value = response.data
+      const response = await groupsAPI.getBatchProgress(selectedGroupId.value, batchTaskId)
 
-      if (progress.value.status === 'completed') {
+      // 更新进度状态
+      progress.value = {
+        total: response.total || 0,
+        completed: response.completed || 0,
+        failed: response.failed || 0,
+        current_file: null,
+        status: response.status
+      }
+
+      // Celery 任务完成状态是 SUCCESS 或 FAILURE
+      if (response.status === 'SUCCESS') {
         clearInterval(pollInterval)
         processing.value = false
         processComplete.value = true
-        ElMessage.success('切割完成')
+        ElMessage.success(mode === 'slip' ? '单支切割完成，请进行校验' : '单字切割完成，请进行校验')
 
-        // Navigate to verification page based on mode
-        if (mode === 'slip') {
-          // Navigate to slip verification
-          router.push(`/recognition/verify/${selectedGroupId.value}/slip`)
-        } else {
-          // Navigate to char verification
-          router.push(`/recognition/verify/${selectedGroupId.value}/char`)
-        }
+        // 跳转到对应校验页
+        router.push(`/batch/verify/${selectedGroupId.value}/${mode}`)
+      } else if (response.status === 'FAILURE') {
+        clearInterval(pollInterval)
+        processing.value = false
+        ElMessage.error('切割任务失败，请重试')
       }
     } catch (error) {
       clearInterval(pollInterval)
@@ -280,39 +304,51 @@ const pollProgress = async (mode) => {
   }, 2000)
 }
 
+// 从单支切割完成回来（校验完毕后可能从 query 参数得知）
 const handleProceedToCharSegment = () => {
+  slipSegmentDone.value = true
   activeTab.value = 'char'
   processComplete.value = false
-  progress.value = { total: 0, completed: 0, current_file: null, status: 'idle' }
+  progress.value = { total: 0, completed: 0, failed: 0, current_file: null, status: 'idle' }
 }
 
 const handleProcessComplete = () => {
-  groupStore.setActiveGroup(selectedGroupId.value)
-  router.push('/metadata')
+  router.push('/detail')
 }
 
 const resetBatchMode = () => {
   selectedGroupId.value = null
   processComplete.value = false
-  progress.value = { total: 0, completed: 0, current_file: null, status: 'idle' }
+  slipSegmentDone.value = false
+  progress.value = { total: 0, completed: 0, failed: 0, current_file: null, status: 'idle' }
   currentMode.value = null
   loadGroups()
 }
 
 const getStatusLabel = (status) => {
   const map = {
-    'created': '已创建',
-    'preprocessing': '预处理中',
-    'segmenting': '切割中',
-    'completed': '已完成',
-    'exported': '已导出'
+    'created': '已创建', 'preprocessing': '预处理中',
+    'segmenting': '切割中', 'completed': '已完成', 'exported': '已导出'
   }
   return map[status] || status
 }
 
-// 初始化
-onMounted(() => {
-  loadGroups()
+// 初始化：从 URL query 读取 groupId
+onMounted(async () => {
+  await loadGroups()
+
+  // 如果从 Groups 页跳转过来，预选组
+  const queryGroupId = route.query.groupId
+  if (queryGroupId) {
+    selectedGroupId.value = queryGroupId
+  }
+
+  // 如果从校验页返回且 stage=slip 的校验已完成（通过 query 标志）
+  if (route.query.slipVerified === '1') {
+    slipSegmentDone.value = true
+    activeTab.value = 'char'
+    ElMessage.success('单支校验完成，可以开始单字切割')
+  }
 })
 </script>
 

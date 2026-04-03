@@ -93,6 +93,11 @@ def _parse_image_group_row(row: Dict[str, Any]) -> Dict[str, Any]:
             return val.replace("+00:00", "Z") if "+00:00" in val else val + "Z"
         return datetime.now().isoformat() + "Z"
 
+    # 处理 thumbnail_url：如果是本地磁盘路径，清空（前端会显示占位符）
+    raw_thumb = row.get("thumbnail_url")
+    if raw_thumb and not (raw_thumb.startswith("http://") or raw_thumb.startswith("https://")):
+        raw_thumb = None
+
     return {
         "id": to_str(row.get("id")),
         "user_id": to_str(row.get("user_id")),
@@ -107,7 +112,7 @@ def _parse_image_group_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "status": row.get("status", "created"),
         "total_images": row.get("total_images", 0) or 0,
         "processed_images": row.get("processed_images", 0) or 0,
-        "thumbnail_url": row.get("thumbnail_url"),
+        "thumbnail_url": raw_thumb,
         "export_url": row.get("export_url"),
         "created_at": to_datetime(row.get("created_at")),
         "updated_at": to_datetime(row.get("updated_at")),
@@ -953,13 +958,18 @@ def _parse_source_image_row(row: Dict[str, Any]) -> SourceImageResponse:
 
     row_group_id = to_str(row.get("group_id"))
     row_id = to_str(row.get("id"))
+
+    # 构造可访问的 HTTP URL（而不是本地磁盘路径）
+    file_http_url = f"/api/groups/{row_group_id}/images/{row_id}/file"
+    thumbnail_http_url = f"/api/groups/{row_group_id}/images/{row_id}/thumbnail"
+
     return SourceImageResponse(
         id=row_id,
         group_id=row_group_id,
         user_id=to_str(row.get("user_id")),
         filename=row.get("filename", ""),
-        file_url=row.get("storage_path", ""),
-        thumbnail_url=row.get("thumbnail_url"),
+        file_url=file_http_url,
+        thumbnail_url=thumbnail_http_url,
         file_size=row.get("file_size", 0) or 0,
         width=row.get("width", 0) or 0,
         height=row.get("height", 0) or 0,

@@ -52,6 +52,7 @@
               <el-button size="small" @click="handleImportImages(group)">导入图片</el-button>
               <el-button size="small" @click="handlePreprocess(group)" :disabled="(group.total_images || 0) === 0">预处理</el-button>
               <el-button size="small" @click="handleSegmentSlips(group)" :disabled="(group.total_images || 0) === 0">切割</el-button>
+              <el-button size="small" type="primary" @click="router.push({ path: '/detail', query: { groupId: group.id } })">详情</el-button>
               <el-button size="small" type="danger" @click="handleDelete(group)">删除</el-button>
             </div>
           </div>
@@ -209,11 +210,14 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { handleApiError } from '@/utils/errorHandler'
 import { Plus, Picture, ArrowDown, UploadFilled, Check, Loading } from '@element-plus/icons-vue'
 import { showError, ErrorLevel } from '@/utils/errorHandler'
 import { useGroupStore } from '@/store/group'
+
+const router = useRouter()
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL || 'http://127.0.0.1:8000'
 
@@ -371,22 +375,8 @@ const handlePreprocess = async (group) => {
   }
 }
 
-const handleSegmentSlips = async (group) => {
-  try {
-    await ElMessageBox.confirm(
-      `确定要对图像组"${group.name}"进行单支切割吗？`,
-      '切割确认',
-      { type: 'info' }
-    )
-    await groupStore.segmentSlips(group.id, {})
-    ElMessage.success('切割任务已提交')
-    // 刷新组状态
-    await groupStore.fetchGroups()
-  } catch (error) {
-    if (error !== 'cancel') {
-      handleApiError(error, '切割失败')
-    }
-  }
+const handleSegmentSlips = (group) => {
+  router.push({ path: '/batch-segmentation', query: { groupId: group.id } })
 }
 
 const handleDelete = async (group) => {

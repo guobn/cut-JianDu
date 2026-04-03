@@ -126,9 +126,14 @@ const groupId = computed(() => route.params.groupId)
 const stage = computed(() => route.params.stage) // 'slip' | 'char'
 
 const groupName = ref('')
-const currentImageName = ref('')
 const imageLoaded = ref(false)
 const imageUrl = ref('')
+
+// 源图列表和当前图片索引
+const sourceImages = ref([])
+const currentImageIndex = ref(0)
+const currentImage = computed(() => sourceImages.value[currentImageIndex.value])
+const currentImageName = computed(() => currentImage.value?.filename || '')
 
 // Canvas state
 let ctx = null
@@ -136,6 +141,8 @@ let canvasWidth = 800
 let canvasHeight = 600
 let scale = 1
 let imageElement = null
+let naturalWidth = 0
+let naturalHeight = 0
 
 // Boxes: [{id, x, y, width, height, selected, verified, rejected}]
 const boxes = ref([])
@@ -176,34 +183,60 @@ onBeforeUnmount(() => {
 
 async function loadGroupData() {
   try {
-    const response = await groupsAPI.getGroup(groupId.value)
-    groupName.value = response.data.name
+    const group = await groupsAPI.getGroupDetail(groupId.value)
+    groupName.value = group.name
   } catch (error) {
     handleApiError(error, '加载组信息失败')
   }
 }
 
 async function loadDetectionResults() {
-  // Load mock detection results for now
-  // In a real implementation, this would call an API to get detection results
-  // For testing, create sample boxes
   try {
-    // Simulated detection results - in real app, fetch from API
-    const sampleBoxes = [
-      { id: 'box_1', x: 100, y: 50, width: 80, height: 300, selected: false, verified: true, rejected: false },
-      { id: 'box_2', x: 200, y: 60, width: 75, height: 280, selected: false, verified: true, rejected: false },
-      { id: 'box_3', x: 300, y: 55, width: 85, height: 290, selected: false, verified: true, rejected: false },
-      { id: 'box_4', x: 400, y: 65, width: 70, height: 270, selected: false, verified: false, rejected: true },
-      { id: 'box_5', x: 500, y: 45, width: 90, height: 310, selected: false, verified: false, rejected: false },
-      { id: 'box_6', x: 600, y: 70, width: 78, height: 285, selected: false, verified: false, rejected: false },
-      { id: 'box_7', x: 700, y: 55, width: 82, height: 295, selected: false, verified: false, rejected: false },
-      { id: 'box_8', x: 800, y: 60, width: 76, height: 288, selected: false, verified: false, rejected: false },
-    ]
-    boxes.value = sampleBoxes
-    currentImageName.value = 'IMG_001.png'
-    imageUrl.value = '/api/groups/' + groupId.value + '/preview'
+    // 获取组内所有源图
+    const result = await groupsAPI.getGroupImages(groupId.value, 1, 200)
+    sourceImages.value = result.items || []
+    if (sourceImages.value.length === 0) return
+
+    // 加载第一张图的检测框
+    await loadBoxesForImage(sourceImages.value[0])
   } catch (error) {
     handleApiError(error, '加载检测结果失败')
+  }
+}
+
+async function loadBoxesForImage(image) {
+  imageLoaded.value = false
+  boxes.value = []
+  selectedBoxId.value = null
+  hasChanges.value = false
+
+  try {
+    // 获取该图的 segments
+    const segments = await groupsAPI.getGroupSegments(groupId.value, {
+      sourceImageId: image.id,
+      type: stage.value
+    })
+
+    boxes.value = (segments || []).map((seg, idx) => ({
+      id: seg.id,
+      segmentId: seg.id,
+      source_image_id: image.id,
+      x: seg.bbox_x,
+      y: seg.bbox_y,
+      width: seg.bbox_width,
+      height: seg.bbox_height,
+      verified: seg.validated || false,
+      rejected: false,
+      selected: false,
+      isNew: false,
+      isDirty: false
+    }))
+
+    // 渲染 Canvas
+    await loadCanvasImage(image)
+  } catch (error) {
+    handleApiError(error, '加载检测框失败')
+    imageLoaded.value = true
   }
 }
 
@@ -231,24 +264,74 @@ function initCanvas() {
   canvas.addEventListener('mouseleave', handleCanvasMouseUp)
 }
 
-async function loadCanvasImage() {
-  // For demo purposes, create a placeholder image
-  // In real app, load actual image from imageUrl
+async function loadCanvasImage(image) {
   const canvas = canvasRef.value
-  if (!canvas) return
+  const container = canvasContainerRef.value
+  if (!canvas || !container) return
 
-  ctx = canvas.getContext('2d')
-  ctx.fillStyle = '#f5f5f5'
-  ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+  const API_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL || 'http://127.0.0.1:8000'
+  const token = localStorage.getItem('access_token') || ''
 
-  // Draw placeholder text
-  ctx.fillStyle = '#999'
-  ctx.font = '16px sans-serif'
-  ctx.textAlign = 'center'
-  ctx.fillText('图像加载区域', canvasWidth / 2, canvasHeight / 2)
+  try {
+    const resp = await fetch(`${API_BASE_URL}/api/groups/${groupId.value}/images/${image.id}/file`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
 
-  imageLoaded.value = true
-  render()
+    const imgEl = new Image()
+    imgEl.crossOrigin = 'anonymous'
+
+    imgEl.onload = () => {
+      naturalWidth = imgEl.naturalWidth
+      naturalHeight = imgEl.naturalHeight
+
+      // 自适应容器
+      const rect = container.getBoundingClientRect()
+      scale = Math.min(
+        rect.width / naturalWidth,
+        rect.height / naturalHeight,
+        1
+      )
+      canvasWidth = Math.floor(naturalWidth * scale)
+      canvasHeight = Math.floor(naturalHeight * scale)
+      canvas.width = canvasWidth
+      canvas.height = canvasHeight
+
+      ctx = canvas.getContext('2d')
+      ctx.drawImage(imgEl, 0, 0, canvasWidth, canvasHeight)
+
+      // 画检测框
+      render()
+
+      imageLoaded.value = true
+      URL.revokeObjectURL(url)
+    }
+
+    imgEl.onerror = () => {
+      // 绘制错误占位符
+      ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#f5f5f5'
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+      ctx.fillStyle = '#999'
+      ctx.font = '16px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('图像加载失败', canvasWidth / 2, canvasHeight / 2)
+      imageLoaded.value = true
+    }
+
+    imgEl.src = url
+  } catch (e) {
+    console.error('图片加载失败', e)
+    ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#f5f5f5'
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+    ctx.fillStyle = '#999'
+    ctx.font = '16px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('图像加载失败', canvasWidth / 2, canvasHeight / 2)
+    imageLoaded.value = true
+  }
 }
 
 function render() {
@@ -672,25 +755,38 @@ function handleFitCanvas() {
 
 async function handleConfirm() {
   try {
-    // Submit verified boxes
-    const verifiedBoxes = boxes.value.filter(b => b.verified).map(b => ({
-      id: b.id,
-      x: b.x,
-      y: b.y,
-      width: b.width,
-      height: b.height
-    }))
+    // 保存所有新增和修改的框
+    for (const box of boxes.value) {
+      if (box.isNew) {
+        await groupsAPI.createSegment(groupId.value, {
+          source_image_id: box.source_image_id,
+          segment_type: stage.value,
+          bbox_x: box.x,
+          bbox_y: box.y,
+          bbox_width: box.width,
+          bbox_height: box.height
+        })
+      } else if (box.isDirty) {
+        await groupsAPI.updateSegment(groupId.value, box.segmentId, {
+          bbox_x: box.x,
+          bbox_y: box.y,
+          bbox_width: box.width,
+          bbox_height: box.height
+        })
+      }
+    }
 
-    // In real implementation, call API to save verification results
-    ElMessage.success('校验结果已提交')
+    // 标记该图的所有片段为已验证
+    await groupsAPI.validateSegments(groupId.value, { image_id: currentImage.value?.id })
 
-    // Navigate based on stage
+    hasChanges.value = false
+    ElMessage.success('校验完成')
+
+    // 导航到下一阶段
     if (stage.value === 'slip') {
-      // After slip verification, proceed to char segmentation
-      router.push('/batch-segmentation')
+      router.push({ path: '/batch-segmentation', query: { groupId: groupId.value, slipVerified: '1' } })
     } else {
-      // After char verification, go to metadata
-      router.push('/metadata')
+      router.push({ path: '/detail', query: { groupId: groupId.value } })
     }
   } catch (error) {
     handleApiError(error, '提交校验结果失败')
