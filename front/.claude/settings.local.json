@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill:*)",
+      "Bash(npm run:*)",
+      "Bash(Get-Content:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}

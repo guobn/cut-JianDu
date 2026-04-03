@@ -1,0 +1,1 @@
+# 将 yolov8l.pt 放在此目录，并在 .env 中设置 YOLOV8_SLIP_MODEL_PATH=models/yolov8l.pt
