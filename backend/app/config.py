@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     char_torchscript_model_path: Optional[str] = "models/best.torchscript"
     char_conf_threshold: float = 0.25
 
+    # 单支简牍 TorchScript 模型（优先级高于 YOLO；默认指向 models/best.torchscript）
+    slip_torchscript_model_path: Optional[str] = "models/best.torchscript"
+    slip_torchscript_conf_threshold: float = 0.25
+
     # SAHI 切片推理配置（用于大图单字检测）
     sahi_slice_size: int = 640  # 切片大小（像素）
     sahi_overlap_ratio: float = 0.25  # 切片重叠比例

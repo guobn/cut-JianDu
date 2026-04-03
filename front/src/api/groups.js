@@ -169,13 +169,15 @@ export const groupsAPI = {
    * @param {string} sourceImageId - 源图像ID（可选）
    * @param {string} type - 类型过滤 slip/char（可选）
    * @param {boolean} validated - 验证状态过滤（可选）
+   * @param {string} parentSegmentId - 父片段ID（可选，用于查询某单支下的所有单字）
    * @returns {Promise<Object>} segments 列表
    */
-  async getGroupSegments(groupId, { sourceImageId, type, validated } = {}) {
+  async getGroupSegments(groupId, { sourceImageId, type, validated, parentSegmentId } = {}) {
     const params = {}
     if (sourceImageId) params.source_image_id = sourceImageId
     if (type) params.type = type
     if (validated !== undefined) params.validated = validated
+    if (parentSegmentId) params.parent_segment_id = parentSegmentId
     return await apiClient.get(`/api/groups/${groupId}/segments`, { params })
   },
 
@@ -288,6 +290,19 @@ export const groupsAPI = {
    */
   async exportGroup(groupId, config) {
     return await apiClient.post(`/api/groups/${groupId}/export`, config)
+  },
+
+  /**
+   * 校验提交后重裁剪指定图像的所有已验证 segments
+   * @param {string} groupId
+   * @param {string} imageId
+   * @param {string} segmentType  "slip" | "char"
+   */
+  async recropValidatedSegments(groupId, imageId, segmentType) {
+    return await apiClient.post(`/api/groups/${groupId}/segments/recrop`, {
+      image_id: imageId,
+      segment_type: segmentType,
+    })
   },
 
   /**

@@ -1383,6 +1383,7 @@ async def list_group_segments(
     type: Optional[str] = Query(None, description="片段类型过滤: slip/char"),
     validated: Optional[bool] = Query(None, description="验证状态过滤"),
     source_image_id: Optional[str] = Query(None, description="源图像ID过滤"),
+    parent_segment_id: Optional[str] = Query(None, description="父片段ID过滤（用于查询某单支下的所有单字）"),
     user=Depends(get_current_user)
 ):
     """
@@ -1430,6 +1431,10 @@ async def list_group_segments(
     # 添加源图像ID过滤
     if source_image_id:
         segments_params["source_image_id"] = f"eq.{source_image_id}"
+
+    # 添加父片段ID过滤
+    if parent_segment_id is not None:
+        segments_params["parent_segment_id"] = f"eq.{parent_segment_id}"
 
     segments_resp = get_session().get(segments_url, headers=_auth_headers(), params=segments_params)
     if segments_resp.status_code >= 400:
@@ -1940,3 +1945,176 @@ async def get_validation_status(
         slips_validated=slips_validated,
         chars_validated=chars_validated
     )
+
+
+# ============================================
+# 校验后重裁剪接口（单支 / 单字通用）
+# ============================================
+
+@router.post("/{group_id}/segments/recrop")
+async def recrop_validated_segments(
+    group_id: str,
+    payload: dict,          # {"image_id": "<source_image_id>", "segment_type": "slip"|"char"}
+    user=Depends(get_current_user)
+):
+    """
+    校验提交后，对指定 source_image 中所有已验证的 segments 重新裁剪并保存。
+    更新 segments 表中对应记录的 storage_path。
+
+    Body:
+        image_id      (str) : source_image 的 UUID
+        segment_type  (str) : "slip" 或 "char"
+    """
+    import cv2, numpy as np
+    from pathlib import Path
+    from app.config import settings
+    from app.utils.image_utils import ImageProcessor
+
+    _require_supabase_config()
+    user_id = _get_user_id(user)
+    _ensure_group_exists_and_owned(group_id, user_id)
+
+    image_id     = payload.get("image_id")
+    segment_type = payload.get("segment_type", "slip")   # "slip" | "char"
+
+    if not image_id:
+        raise HTTPException(status_code=400, detail="缺少 image_id")
+
+    # ------------------------------------------------------------------
+    # 1. 获取 source_image 记录（拿到本地路径）
+    # ------------------------------------------------------------------
+    img_url    = f"{_base_url()}/rest/v1/source_images"
+    img_params = {"id": f"eq.{image_id}", "group_id": f"eq.{group_id}"}
+    img_resp   = get_session().get(img_url, headers=_auth_headers(), params=img_params)
+
+    if img_resp.status_code >= 400 or not img_resp.json():
+        raise HTTPException(status_code=404, detail=f"source_image 不存在: {image_id}")
+
+    img_row      = img_resp.json()[0]
+    storage_path = img_row.get("storage_path") or ""
+    filename     = img_row.get("filename", "")
+
+    # 确定原图本地路径
+    if storage_path and Path(storage_path).exists():
+        source_path = Path(storage_path)
+    else:
+        source_path = Path(settings.upload_dir) / group_id / filename
+
+    if not source_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"原图文件不存在: {source_path}"
+        )
+
+    # 加载原图
+    image = ImageProcessor.load_image(source_path)   # -> np.ndarray (BGR)
+
+    # ------------------------------------------------------------------
+    # 2. 获取该图所有已验证的目标类型 segments
+    # ------------------------------------------------------------------
+    seg_url    = f"{_base_url()}/rest/v1/segments"
+    seg_params = {
+        "source_image_id": f"eq.{image_id}",
+        "segment_type"   : f"eq.{segment_type}",
+        "validated"      : "eq.true",
+    }
+    seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
+    if seg_resp.status_code >= 400:
+        raise HTTPException(
+            status_code=500,
+            detail=f"查询 segments 失败: {seg_resp.status_code}"
+        )
+
+    segments = seg_resp.json() or []
+    updated  = 0
+    errors   = []
+
+    img_h, img_w = image.shape[:2]
+
+    for seg in segments:
+        seg_id = seg["id"]
+        try:
+            # ------------------------------------------------------------------
+            # 加载图像（char 类型优先从 parent slip 文件裁剪，否则使用原图）
+            # ------------------------------------------------------------------
+            def _load_source_for_segment(seg_row):
+                """根据 segment 类型决定裁剪来源图像。"""
+                if segment_type == "char":
+                    parent_id = seg_row.get("parent_segment_id")
+                    if parent_id:
+                        # 查询 parent slip 的 storage_path
+                        ps_url  = f"{_base_url()}/rest/v1/segments"
+                        ps_resp = get_session().get(
+                            ps_url,
+                            headers=_auth_headers(),
+                            params={"id": f"eq.{parent_id}"}
+                        )
+                        if ps_resp.status_code < 400 and ps_resp.json():
+                            slip_path = ps_resp.json()[0].get("storage_path", "")
+                            if slip_path and Path(slip_path).exists():
+                                return ImageProcessor.load_image(Path(slip_path))
+                return image   # 默认回退到原图
+
+            src_image = _load_source_for_segment(seg)
+            src_h, src_w = src_image.shape[:2]
+
+            x = max(0, int(seg.get("bbox_x", 0)))
+            y = max(0, int(seg.get("bbox_y", 0)))
+            w = int(seg.get("bbox_width", 0))
+            h = int(seg.get("bbox_height", 0))
+
+            # 对于 char，bbox 坐标是原图坐标系，需转换为 slip 坐标系
+            if segment_type == "char":
+                parent_id = seg.get("parent_segment_id")
+                if parent_id:
+                    ps_url  = f"{_base_url()}/rest/v1/segments"
+                    ps_resp = get_session().get(
+                        ps_url, headers=_auth_headers(),
+                        params={"id": f"eq.{parent_id}"}
+                    )
+                    if ps_resp.status_code < 400 and ps_resp.json():
+                        slip = ps_resp.json()[0]
+                        slip_path = slip.get("storage_path", "")
+                        if slip_path and Path(slip_path).exists():
+                            # 转换坐标到 slip 局部坐标系
+                            x -= int(slip.get("bbox_x", 0))
+                            y -= int(slip.get("bbox_y", 0))
+
+            x = max(0, x)
+            y = max(0, y)
+            w = min(w, src_w - x)
+            h = min(h, src_h - y)
+            if w <= 0 or h <= 0:
+                continue
+
+            cropped = src_image[y:y+h, x:x+w]
+
+            # 保存目录：results/{group_id}/{segment_type}/
+            save_dir  = Path(settings.result_dir) / group_id / segment_type
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            idx       = seg.get("segment_index", 0)
+            filename_ = f"{image_id}_{idx}.jpg"
+            save_path = save_dir / filename_
+
+            cv2.imwrite(str(save_path), cropped)
+
+            # ----------------------------------------------------------
+            # 3. 更新 segments 表 storage_path
+            # ----------------------------------------------------------
+            upd_url    = f"{_base_url()}/rest/v1/segments"
+            upd_params = {"id": f"eq.{seg_id}"}
+            upd_headers = _auth_headers()
+            upd_headers["Prefer"] = "return=representation"
+            get_session().patch(
+                upd_url,
+                headers=upd_headers,
+                params=upd_params,
+                json={"storage_path": str(save_path)}
+            )
+            updated += 1
+
+        except Exception as e:
+            errors.append(f"{seg_id}: {str(e)}")
+
+    return {"updated": updated, "errors": errors}

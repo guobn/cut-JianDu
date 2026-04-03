@@ -432,6 +432,7 @@ class SegmentationService:
         # Keep old model caches for backward compatibility
         self._yolo_slip_model = None
         self._char_torchscript_model = None
+        self._slip_torchscript_model = None
     
     def _get_yolo_slip_model(self):
         """懒加载单支检测 YOLO 模型（yolov8l.pt），仅当配置了路径且文件存在时加载。"""
@@ -494,6 +495,36 @@ class SegmentationService:
             log.warning("单字符 TorchScript: 加载失败 %s，使用 OpenCV 回退", e)
             return None
 
+    def _get_slip_torchscript_model(self):
+        """懒加载单支简牍 TorchScript 模型（默认 best.torchscript）。"""
+        log = logging.getLogger(__name__)
+
+        if self._slip_torchscript_model is not None:
+            return self._slip_torchscript_model
+
+        path = getattr(settings, "slip_torchscript_model_path", None) or ""
+        if not path:
+            return None
+
+        p = Path(path)
+        if not p.is_absolute():
+            base = Path(__file__).resolve().parent.parent.parent
+            p = base / path
+        if not p.exists():
+            log.warning("slip_torchscript_model_path 不存在: %s", path)
+            return None
+
+        try:
+            import torch
+            with open(str(p), "rb") as f:
+                self._slip_torchscript_model = torch.jit.load(f, map_location="cpu")
+            self._slip_torchscript_model.eval()
+            log.info("单支 TorchScript 模型加载成功: %s", path)
+            return self._slip_torchscript_model
+        except Exception as e:
+            log.warning("单支 TorchScript 模型加载失败: %s", e)
+            return None
+
     def detect_single_slips(
         self,
         image: np.ndarray,
@@ -516,12 +547,20 @@ class SegmentationService:
             # 图像增强预处理
             enhanced_image = ImageProcessor.enhance_for_detection(image, detection_type='slip')
 
-            # 从 ModelFactory 获取模型（带 fallback）
-            model = self._model_factory.get_model(params.model_type, use_fallback=True)
+            # ----------------------------------------------------------
+            # 优先使用 TorchScript 模型（best.torchscript），与单字检测逻辑一致
+            # ----------------------------------------------------------
+            ts_model = self._get_slip_torchscript_model()
+            if ts_model is not None:
+                log.info("使用 TorchScript 模型进行单支检测")
+                return self._detect_single_characters_torchscript(enhanced_image, params, ts_model)
 
+            # 次选：ModelFactory YOLO 模型（带 fallback）
+            model = self._model_factory.get_model(params.model_type, use_fallback=True)
             if model is not None:
                 log.info("使用 %s 模型进行单支检测", params.model_type.value)
                 return self._detect_single_slips_yolo(enhanced_image, params, model)
+
             # OpenCV fallback
             log.info("无可用模型，使用 OpenCV 回退")
             return self._detect_single_slips_opencv(enhanced_image, params)

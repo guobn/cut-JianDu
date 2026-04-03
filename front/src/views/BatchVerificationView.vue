@@ -816,6 +816,17 @@ async function handleConfirm() {
     // 3. 标记当前图片所有片段为已验证
     await groupsAPI.validateSegments(groupId.value, { image_id: currentImage.value?.id })
 
+    // 4. 校验后重裁剪（以用户校验后的 bbox 为准覆盖裁剪图）
+    try {
+      await groupsAPI.recropValidatedSegments(
+        groupId.value,
+        currentImage.value?.id,
+        stage.value   // 'slip' 或 'char'
+      )
+    } catch (recropErr) {
+      console.warn('重裁剪失败（不影响校验结果）:', recropErr)
+    }
+
     hasChanges.value = false
     ElMessage.success('校验完成')
 
