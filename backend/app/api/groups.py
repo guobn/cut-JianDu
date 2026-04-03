@@ -537,20 +537,28 @@ async def get_batch_progress(
 
     # 使用 AsyncResult 获取 Celery 任务状态
     batch_result = AsyncResult(batch_task_id, app=celery_app)
-
-    # 获取任务状态和进度信息
     task_state = batch_result.state
-    task_meta = batch_result.info if hasattr(batch_result, "info") else {}
 
-    # 提取进度信息
+    # 根据状态读取不同来源
+    if task_state == "SUCCESS":
+        # 任务完成：result 里有最终统计
+        task_meta = batch_result.result or {}
+    elif task_state == "FAILURE":
+        # 任务失败：info 里有异常信息
+        task_meta = {}
+        error_info = str(batch_result.info) if batch_result.info else "未知错误"
+    else:
+        # PENDING / STARTED / PROGRESS：info 里有中间状态
+        task_meta = batch_result.info or {}
+
     if isinstance(task_meta, dict):
-        progress = task_meta.get("progress", 0.0)
+        progress_val = task_meta.get("progress", 1.0 if task_state == "SUCCESS" else 0.0)
         total = task_meta.get("total", 0)
         completed = task_meta.get("completed", 0)
         failed = task_meta.get("failed", 0)
         errors = task_meta.get("errors", [])
     else:
-        progress = 0.0
+        progress_val = 0.0
         total = 0
         completed = 0
         failed = 0
@@ -559,7 +567,7 @@ async def get_batch_progress(
     return {
         "batch_task_id": batch_task_id,
         "status": task_state,
-        "progress": progress,
+        "progress": progress_val,
         "total": total,
         "completed": completed,
         "failed": failed,
@@ -984,8 +992,10 @@ def _parse_source_image_row(row: Dict[str, Any]) -> SourceImageResponse:
     row_id = to_str(row.get("id"))
 
     # 构造可访问的 HTTP URL（而不是本地磁盘路径）
-    file_http_url = f"/api/groups/{row_group_id}/images/{row_id}/file"
-    thumbnail_http_url = f"/api/groups/{row_group_id}/images/{row_id}/thumbnail"
+    # group_id 为 None 时使用空字符串
+    group_id_for_url = row_group_id or ""
+    file_http_url = f"/api/groups/{group_id_for_url}/images/{row_id}/file"
+    thumbnail_http_url = f"/api/groups/{group_id_for_url}/images/{row_id}/thumbnail"
 
     return SourceImageResponse(
         id=row_id,
@@ -1118,7 +1128,7 @@ async def upload_group_images(
 async def list_group_images(
     group_id: str,
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=500),
     user=Depends(get_current_user)
 ):
     """
@@ -1359,8 +1369,8 @@ def _parse_segment_row(row: Dict[str, Any]) -> SegmentResponse:
         bbox_y=row.get("bbox_y", 0.0),
         bbox_width=row.get("bbox_width", 0.0),
         bbox_height=row.get("bbox_height", 0.0),
-        width=row.get("width", 0),
-        height=row.get("height", 0),
+        width=row.get("width"),
+        height=row.get("height"),
         validated=row.get("validated", False),
         parent_segment_id=to_str(row.get("parent_segment_id")),
         created_at=row.get("created_at", datetime.now().isoformat() + "Z")
@@ -1493,7 +1503,8 @@ async def create_group_segment(
         "bbox_y": data.bbox_y,
         "bbox_width": data.bbox_width,
         "bbox_height": data.bbox_height,
-        "validated": False,
+        "storage_path": "",  # 手动创建的片段暂无存储路径
+        "validated": data.validated,
     }
     if data.parent_segment_id:
         segment_row["parent_segment_id"] = data.parent_segment_id
@@ -1517,6 +1528,98 @@ async def create_group_segment(
         )
 
     return _parse_segment_row(result[0])
+
+
+@router.put("/{group_id}/segments/validate-all")
+async def validate_group_segments(
+    group_id: str,
+    request: ValidateSegmentsRequest,
+    user=Depends(get_current_user)
+):
+    """
+    标记片段为已验证
+
+    Body (二选一):
+    - image_id: 图像ID（验证该图像所有片段）
+    - segment_ids: 片段ID列表
+    """
+    _require_supabase_config()
+    user_id = _get_user_id(user)
+
+    # 验证组存在且属于当前用户
+    _ensure_group_exists_and_owned(group_id, user_id)
+
+    if not request.image_id and not request.segment_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="必须提供 image_id 或 segment_ids 之一"
+        )
+
+    updated_count = 0
+
+    if request.image_id:
+        # 验证 image_id 属于该组
+        img_url = f"{_base_url()}/rest/v1/source_images"
+        img_params = {"id": f"eq.{request.image_id}", "group_id": f"eq.{group_id}"}
+        img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
+        if img_resp.status_code >= 400 or not img_resp.json():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"图像不存在或不属于该组：{request.image_id}"
+            )
+
+        # 验证该图像所有片段
+        seg_url = f"{_base_url()}/rest/v1/segments"
+        seg_params = {"source_image_id": f"eq.{request.image_id}"}
+        seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
+        if seg_resp.status_code >= 400:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"查询片段失败：{seg_resp.status_code} {seg_resp.text[:200]}"
+            )
+
+        segment_ids = [seg["id"] for seg in seg_resp.json() or []]
+        if not segment_ids:
+            return {"message": "No segments to validate", "updated_count": 0}
+
+        # 批量更新
+        update_url = f"{_base_url()}/rest/v1/segments"
+        update_headers = _auth_headers()
+        update_headers["Prefer"] = "return=representation"
+
+        for sid in segment_ids:
+            update_params = {"id": f"eq.{sid}"}
+            upd_resp = get_session().patch(update_url, headers=update_headers, params=update_params, json={"validated": True})
+            if upd_resp.status_code < 400:
+                updated_count += 1
+
+    elif request.segment_ids:
+        # 逐个验证 segment 属于该组
+        for segment_id in request.segment_ids:
+            seg_url = f"{_base_url()}/rest/v1/segments"
+            seg_params = {"id": f"eq.{segment_id}"}
+            seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
+            if seg_resp.status_code >= 400 or not seg_resp.json():
+                continue
+
+            seg_row = seg_resp.json()[0]
+            source_image_id = seg_row.get("source_image_id")
+
+            # 验证 source_image 属于该组
+            img_url = f"{_base_url()}/rest/v1/source_images"
+            img_params = {"id": f"eq.{source_image_id}", "group_id": f"eq.{group_id}"}
+            img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
+            if img_resp.status_code >= 400 or not img_resp.json():
+                continue
+
+            # 更新验证状态
+            update_url = f"{_base_url()}/rest/v1/segments"
+            update_params = {"id": f"eq.{segment_id}"}
+            upd_resp = get_session().patch(update_url, headers=_auth_headers(), params=update_params, json={"validated": True})
+            if upd_resp.status_code < 400:
+                updated_count += 1
+
+    return {"message": "Segments validated", "updated_count": updated_count}
 
 
 @router.put("/{group_id}/segments/{segment_id}", response_model=SegmentResponse)
@@ -1664,6 +1767,34 @@ async def delete_group_segment(
     return {"message": "Segment deleted", "segment_id": segment_id, "group_id": group_id}
 
 
+@router.get("/{group_id}/segments/{segment_id}/file")
+async def get_segment_file(
+    group_id: str,
+    segment_id: str,
+    user=Depends(get_current_user)
+):
+    """获取片段裁剪图文件（本地存储）"""
+    _require_supabase_config()
+    user_id = _get_user_id(user)
+
+    # 验证组存在且属于当前用户
+    _ensure_group_exists_and_owned(group_id, user_id)
+
+    # 查询片段记录获取 storage_path
+    url = f"{_base_url()}/rest/v1/segments"
+    params = {"id": f"eq.{segment_id}"}
+    resp = get_session().get(url, headers=_auth_headers(), params=params)
+    if resp.status_code >= 400 or not resp.json():
+        raise HTTPException(status_code=404, detail=f"片段不存在: {segment_id}")
+
+    seg_row = resp.json()[0]
+    storage_path = seg_row.get("storage_path")
+    if not storage_path or not Path(storage_path).exists():
+        raise HTTPException(status_code=404, detail="片段文件不存在，请重新切割")
+
+    return FileResponse(path=storage_path, media_type="image/jpeg")
+
+
 @router.post("/{group_id}/segments/batch-delete")
 async def batch_delete_group_segments(
     group_id: str,
@@ -1727,98 +1858,6 @@ async def batch_delete_group_segments(
         "results": results,
         "errors": errors
     }
-
-
-@router.put("/{group_id}/segments/validate")
-async def validate_group_segments(
-    group_id: str,
-    request: ValidateSegmentsRequest,
-    user=Depends(get_current_user)
-):
-    """
-    标记片段为已验证
-
-    Body (二选一):
-    - image_id: 图像ID（验证该图像所有片段）
-    - segment_ids: 片段ID列表
-    """
-    _require_supabase_config()
-    user_id = _get_user_id(user)
-
-    # 验证组存在且属于当前用户
-    _ensure_group_exists_and_owned(group_id, user_id)
-
-    if not request.image_id and not request.segment_ids:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="必须提供 image_id 或 segment_ids 之一"
-        )
-
-    updated_count = 0
-
-    if request.image_id:
-        # 验证 image_id 属于该组
-        img_url = f"{_base_url()}/rest/v1/source_images"
-        img_params = {"id": f"eq.{request.image_id}", "group_id": f"eq.{group_id}"}
-        img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
-        if img_resp.status_code >= 400 or not img_resp.json():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"图像不存在或不属于该组：{request.image_id}"
-            )
-
-        # 验证该图像所有片段
-        seg_url = f"{_base_url()}/rest/v1/segments"
-        seg_params = {"source_image_id": f"eq.{request.image_id}"}
-        seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
-        if seg_resp.status_code >= 400:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"查询片段失败：{seg_resp.status_code} {seg_resp.text[:200]}"
-            )
-
-        segment_ids = [seg["id"] for seg in seg_resp.json() or []]
-        if not segment_ids:
-            return {"message": "No segments to validate", "updated_count": 0}
-
-        # 批量更新
-        update_url = f"{_base_url()}/rest/v1/segments"
-        update_headers = _auth_headers()
-        update_headers["Prefer"] = "return=representation"
-
-        for sid in segment_ids:
-            update_params = {"id": f"eq.{sid}"}
-            upd_resp = get_session().patch(update_url, headers=update_headers, params=update_params, json={"validated": True})
-            if upd_resp.status_code < 400:
-                updated_count += 1
-
-    elif request.segment_ids:
-        # 逐个验证 segment 属于该组
-        for segment_id in request.segment_ids:
-            seg_url = f"{_base_url()}/rest/v1/segments"
-            seg_params = {"id": f"eq.{segment_id}"}
-            seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
-            if seg_resp.status_code >= 400 or not seg_resp.json():
-                continue
-
-            seg_row = seg_resp.json()[0]
-            source_image_id = seg_row.get("source_image_id")
-
-            # 验证 source_image 属于该组
-            img_url = f"{_base_url()}/rest/v1/source_images"
-            img_params = {"id": f"eq.{source_image_id}", "group_id": f"eq.{group_id}"}
-            img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
-            if img_resp.status_code >= 400 or not img_resp.json():
-                continue
-
-            # 更新验证状态
-            update_url = f"{_base_url()}/rest/v1/segments"
-            update_params = {"id": f"eq.{segment_id}"}
-            upd_resp = get_session().patch(update_url, headers=_auth_headers(), params=update_params, json={"validated": True})
-            if upd_resp.status_code < 400:
-                updated_count += 1
-
-    return {"message": "Segments validated", "updated_count": updated_count}
 
 
 @router.get("/{group_id}/validation-status", response_model=ValidationStatusResponse)

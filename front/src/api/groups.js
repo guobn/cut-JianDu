@@ -277,7 +277,7 @@ export const groupsAPI = {
    * @returns {Promise<Object>} 校验结果
    */
   async validateSegments(groupId, data) {
-    return await apiClient.put(`/api/groups/${groupId}/segments/validate`, data)
+    return await apiClient.put(`/api/groups/${groupId}/segments/validate-all`, data)
   },
 
   /**
@@ -288,6 +288,17 @@ export const groupsAPI = {
    */
   async exportGroup(groupId, config) {
     return await apiClient.post(`/api/groups/${groupId}/export`, config)
+  },
+
+  /**
+   * 获取片段裁剪图文件URL（供 img src 使用）
+   * @param {string} groupId - 组ID
+   * @param {string} segmentId - 片段ID
+   * @returns {string} 文件URL字符串
+   */
+  getSegmentFileUrl(groupId, segmentId) {
+    const API_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL || 'http://127.0.0.1:8000'
+    return `${API_BASE_URL}/api/groups/${groupId}/segments/${segmentId}/file`
   }
 }
 

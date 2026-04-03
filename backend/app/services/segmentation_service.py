@@ -911,14 +911,7 @@ class SegmentationService:
             # 图像增强预处理
             enhanced_image = ImageProcessor.enhance_for_detection(image, detection_type='character')
 
-            # 如果指定了 RGA-CRNN，优先尝试加载
-            if params.model_type == ModelType.RGA_CRNN:
-                model = self._model_factory.get_model(ModelType.RGA_CRNN, use_fallback=False)
-                if model is not None:
-                    log.info("使用 RGA-CRNN 模型进行单字符检测")
-                    return self._detect_single_characters_rga_crnn(enhanced_image, params, model)
-
-            # 回退到 TorchScript
+            # 直接使用 TorchScript 模型进行单字符检测
             model = self._get_char_torchscript_model()
             if model is not None:
                 return self._detect_single_characters_torchscript(enhanced_image, params, model)

@@ -155,9 +155,9 @@ class BatchMetadataUpdate(BaseModel):
 
 class SourceImageResponse(BaseModel):
     """源图像响应"""
-    id: UUID
-    group_id: UUID
-    user_id: UUID
+    id: Optional[UUID] = None
+    group_id: Optional[UUID] = None
+    user_id: Optional[UUID] = None
     filename: str
     file_url: str
     thumbnail_url: Optional[str]
@@ -193,6 +193,7 @@ class SegmentCreate(BaseModel):
     bbox_width: float = Field(..., description="边界框宽度")
     bbox_height: float = Field(..., description="边界框高度")
     parent_segment_id: Optional[str] = Field(None, description="父片段ID（用于字符归属于单支）")
+    validated: bool = Field(False, description="是否已验证")
 
 
 class SegmentUpdate(BaseModel):
@@ -217,8 +218,8 @@ class SegmentResponse(BaseModel):
     bbox_y: float
     bbox_width: float
     bbox_height: float
-    width: int
-    height: int
+    width: Optional[int] = None
+    height: Optional[int] = None
     validated: bool
     parent_segment_id: Optional[str]
     created_at: str

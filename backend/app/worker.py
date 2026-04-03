@@ -23,9 +23,16 @@ celery_app.conf.update(
     result_expires=3600,
     # 任务追踪
     task_track_started=True,
+    # 使用 solo pool 避免 billiard 兼容性问题
+    worker_pool="solo",
+    # Redis 连接重试配置
+    broker_connection_retry_on_startup=True,
+    broker_connection_retry=True,
+    broker_connection_max_retries=10,
     # 结果后端配置
     result_backend_transport_options={
         "master_name": "mymaster",
+        "connection_pool": True,
     },
 )
 

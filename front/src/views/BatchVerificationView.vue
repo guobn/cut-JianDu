@@ -30,6 +30,19 @@
               <el-button type="primary" @click="handleZoom(1)" :disabled="!imageLoaded">100%</el-button>
               <el-button @click="handleFitCanvas" :disabled="!imageLoaded">适应</el-button>
             </el-button-group>
+            <el-button-group size="small" style="margin-left: 12px;">
+              <el-button @click="handlePrevImage" :disabled="currentImageIndex <= 0">
+                <el-icon><ArrowLeft /></el-icon>
+                上一张
+              </el-button>
+              <el-button @click="handleNextImage" :disabled="currentImageIndex >= sourceImages.length - 1">
+                下一张
+                <el-icon><ArrowRight /></el-icon>
+              </el-button>
+            </el-button-group>
+            <span style="margin-left: 12px; font-size: 13px; color: #666;">
+              {{ currentImageIndex + 1 }} / {{ sourceImages.length }}
+            </span>
           </div>
         </div>
         <div class="canvas-container" ref="canvasContainerRef">
@@ -110,12 +123,14 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Check, Close, QuestionFilled, Picture } from '@element-plus/icons-vue'
+import { ArrowLeft, Check, Close, QuestionFilled, Picture, ArrowRight } from '@element-plus/icons-vue'
 import { groupsAPI } from '@/api/groups'
 import { handleApiError } from '@/utils/errorHandler'
+import { useUserStore } from '@/store/user'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 
 // Refs
 const canvasContainerRef = ref(null)
@@ -141,6 +156,7 @@ let canvasWidth = 800
 let canvasHeight = 600
 let scale = 1
 let imageElement = null
+let cachedImageElement = null
 let naturalWidth = 0
 let naturalHeight = 0
 
@@ -156,12 +172,15 @@ const resizeHandle = ref(null) // 'nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'
 // Batch selection
 const selectAll = ref(false)
 
+// 已删除的框ID集合（用于确认时同步删除）
+const deletedBoxIds = ref(new Set())
+
 // Computed
 const selectedBox = computed(() => boxes.value.find(b => b.id === selectedBoxId.value))
 const selectedBoxIndex = computed(() => boxes.value.findIndex(b => b.id === selectedBoxId.value))
 const totalCount = computed(() => boxes.value.length)
 const verifiedCount = computed(() => boxes.value.filter(b => b.verified).length)
-const hasChanges = computed(() => boxes.value.some(b => b.selected || b.verified || b.rejected))
+const hasChanges = ref(false)
 const hasSelectedBoxes = computed(() => boxes.value.some(b => b.selected))
 const isIndeterminate = computed(() => {
   const selected = boxes.value.filter(b => b.selected).length
@@ -209,6 +228,7 @@ async function loadBoxesForImage(image) {
   boxes.value = []
   selectedBoxId.value = null
   hasChanges.value = false
+  deletedBoxIds.value.clear()  // 清空已删除标记
 
   try {
     // 获取该图的 segments
@@ -225,7 +245,7 @@ async function loadBoxesForImage(image) {
       y: seg.bbox_y,
       width: seg.bbox_width,
       height: seg.bbox_height,
-      verified: seg.validated || false,
+      verified: true,  // 检测出的框默认已校验
       rejected: false,
       selected: false,
       isNew: false,
@@ -270,7 +290,7 @@ async function loadCanvasImage(image) {
   if (!canvas || !container) return
 
   const API_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL || 'http://127.0.0.1:8000'
-  const token = localStorage.getItem('access_token') || ''
+  const token = userStore.session?.access_token || ''
 
   try {
     const resp = await fetch(`${API_BASE_URL}/api/groups/${groupId.value}/images/${image.id}/file`, {
@@ -283,6 +303,7 @@ async function loadCanvasImage(image) {
     imgEl.crossOrigin = 'anonymous'
 
     imgEl.onload = () => {
+      cachedImageElement = imgEl
       naturalWidth = imgEl.naturalWidth
       naturalHeight = imgEl.naturalHeight
 
@@ -344,24 +365,9 @@ function render() {
   ctx.fillStyle = '#f5f5f5'
   ctx.fillRect(0, 0, canvasWidth, canvasHeight)
 
-  // Draw image placeholder
-  ctx.fillStyle = '#ddd'
-  ctx.fillRect(50, 50, canvasWidth - 100, canvasHeight - 100)
-
-  // Draw grid pattern to simulate image
-  ctx.strokeStyle = '#eee'
-  ctx.lineWidth = 1
-  for (let x = 50; x < canvasWidth - 50; x += 20) {
-    ctx.beginPath()
-    ctx.moveTo(x, 50)
-    ctx.lineTo(x, canvasHeight - 50)
-    ctx.stroke()
-  }
-  for (let y = 50; y < canvasHeight - 50; y += 20) {
-    ctx.beginPath()
-    ctx.moveTo(50, y)
-    ctx.lineTo(canvasWidth - 50, y)
-    ctx.stroke()
+  // Draw cached image if available
+  if (cachedImageElement) {
+    ctx.drawImage(cachedImageElement, 0, 0, canvasWidth, canvasHeight)
   }
 
   // Draw boxes
@@ -577,7 +583,8 @@ function handleCanvasMouseMove(e) {
 
     const boxIndex = boxes.value.findIndex(b => b.id === dragState.value.boxId)
     if (boxIndex !== -1) {
-      boxes.value[boxIndex] = newBox
+      boxes.value[boxIndex] = { ...newBox, isDirty: true }
+      hasChanges.value = true
       render()
     }
     return
@@ -593,8 +600,10 @@ function handleCanvasMouseMove(e) {
       boxes.value[boxIndex] = {
         ...boxes.value[boxIndex],
         x: Math.max(0, original.x + dx),
-        y: Math.max(0, original.y + dy)
+        y: Math.max(0, original.y + dy),
+        isDirty: true
       }
+      hasChanges.value = true
       render()
     }
   }
@@ -618,10 +627,16 @@ function handleCanvasMouseUp(e) {
         height: h / scale,
         selected: false,
         verified: false,
-        rejected: false
+        rejected: false,
+        isNew: true,
+        isDirty: false,
+        segmentId: null,
+        source_image_id: currentImage.value?.id
       }
       boxes.value.push(newBox)
       selectedBoxId.value = newBox.id
+      hasChanges.value = true
+      isAddingBox.value = false
       ElMessage.success('已添加新框')
     }
   }
@@ -734,10 +749,17 @@ function handleBatchDelete() {
     type: 'warning'
   }).then(() => {
     const selectedIds = new Set(selectedBoxes.map(b => b.id))
+    // 记录要删除的框ID（非新增的框需要从后端删除）
+    selectedBoxes.forEach(box => {
+      if (!box.isNew) {
+        deletedBoxIds.value.add(box.segmentId)
+      }
+    })
     boxes.value = boxes.value.filter(b => !selectedIds.has(b.id))
     if (selectedBoxId.value && selectedIds.has(selectedBoxId.value)) {
       selectedBoxId.value = null
     }
+    hasChanges.value = true
     ElMessage.success('已删除选中的框')
     render()
   }).catch(() => {})
@@ -755,7 +777,20 @@ function handleFitCanvas() {
 
 async function handleConfirm() {
   try {
-    // 保存所有新增和修改的框
+    // 1. 先删除标记的框
+    if (deletedBoxIds.value.size > 0) {
+      const idsToDelete = Array.from(deletedBoxIds.value)
+      for (const segId of idsToDelete) {
+        try {
+          await groupsAPI.deleteSegment(groupId.value, segId)
+        } catch (e) {
+          console.warn('删除片段失败:', segId, e)
+        }
+      }
+      deletedBoxIds.value.clear()
+    }
+
+    // 2. 保存当前图片的新增和修改的框
     for (const box of boxes.value) {
       if (box.isNew) {
         await groupsAPI.createSegment(groupId.value, {
@@ -764,19 +799,21 @@ async function handleConfirm() {
           bbox_x: box.x,
           bbox_y: box.y,
           bbox_width: box.width,
-          bbox_height: box.height
+          bbox_height: box.height,
+          validated: true
         })
       } else if (box.isDirty) {
         await groupsAPI.updateSegment(groupId.value, box.segmentId, {
           bbox_x: box.x,
           bbox_y: box.y,
           bbox_width: box.width,
-          bbox_height: box.height
+          bbox_height: box.height,
+          validated: true
         })
       }
     }
 
-    // 标记该图的所有片段为已验证
+    // 3. 标记当前图片所有片段为已验证
     await groupsAPI.validateSegments(groupId.value, { image_id: currentImage.value?.id })
 
     hasChanges.value = false
@@ -801,6 +838,24 @@ function handleBack() {
   }).then(() => {
     router.back()
   }).catch(() => {})
+}
+
+async function handlePrevImage() {
+  if (currentImageIndex.value > 0) {
+    currentImageIndex.value--
+    await loadBoxesForImage(sourceImages.value[currentImageIndex.value])
+  } else {
+    ElMessage.warning('已经是第一张图片')
+  }
+}
+
+async function handleNextImage() {
+  if (currentImageIndex.value < sourceImages.value.length - 1) {
+    currentImageIndex.value++
+    await loadBoxesForImage(sourceImages.value[currentImageIndex.value])
+  } else {
+    ElMessage.warning('已经是最后一张图片')
+  }
 }
 
 // Watch for canvas container resize
