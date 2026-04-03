@@ -48,7 +48,7 @@ class Settings(BaseSettings):
 
     # 单字符区域识别 TorchScript 模型（可选，配置后优先使用，否则 OpenCV 连通域）
     # 例如自训练导出的 models/best.torchscript
-    char_torchscript_model_path: Optional[str] = None
+    char_torchscript_model_path: Optional[str] = "models/best.torchscript"
     char_conf_threshold: float = 0.25
 
     # SAHI 切片推理配置（用于大图单字检测）

@@ -31,7 +31,13 @@
               <el-icon v-else-if="data.type === 'image'" class="node-icon">
                 <Picture />
               </el-icon>
-              <el-icon v-else-if="data.type === 'slip'" class="node-icon">
+              <el-icon v-else-if="data.type === 'slip-folder'" class="node-icon">
+                <FolderOpened />
+              </el-icon>
+              <el-icon v-else-if="data.type === 'slip-crop'" class="node-icon">
+                <Picture />
+              </el-icon>
+              <el-icon v-else-if="data.type === 'char'" class="node-icon">
                 <DocumentCopy />
               </el-icon>
               <el-icon v-else class="node-icon">
@@ -97,6 +103,57 @@
             <el-descriptions-item label="格式">{{ selectedNode.format }}</el-descriptions-item>
             <el-descriptions-item label="大小">{{ formatFileSize(selectedNode.file_size) }}</el-descriptions-item>
           </el-descriptions>
+        </div>
+
+        <!-- 单支文件夹级别 -->
+        <div v-else-if="selectedNode && selectedNode.type === 'slip-folder'" class="content-section">
+          <div class="section-header">
+            <h3>{{ selectedNode.name }}</h3>
+            <el-tag type="success">单支</el-tag>
+          </div>
+          <el-descriptions :column="2" border>
+            <el-descriptions-item label="ID">{{ selectedNode.segment_id }}</el-descriptions-item>
+            <el-descriptions-item label="置信度">{{ selectedNode.confidence ? (selectedNode.confidence * 100).toFixed(1) + '%' : 'N/A' }}</el-descriptions-item>
+            <el-descriptions-item label="尺寸">{{ selectedNode.width }} × {{ selectedNode.height }}</el-descriptions-item>
+            <el-descriptions-item label="校验状态">{{ selectedNode.validated ? '已校验' : '未校验' }}</el-descriptions-item>
+          </el-descriptions>
+
+          <h4>元数据标注</h4>
+          <el-form :model="slipMetadataForm" label-width="120px" class="metadata-form">
+            <el-form-item label="单支编号">
+              <el-input v-model="slipMetadataForm.slip_id" placeholder="输入单支编号" />
+            </el-form-item>
+            <el-form-item label="文字内容">
+              <el-input v-model="slipMetadataForm.content_text" type="textarea" :rows="3" placeholder="输入文字内容" />
+            </el-form-item>
+            <el-form-item label="保存状况">
+              <el-select v-model="slipMetadataForm.condition" placeholder="选择保存状况">
+                <el-option label="完好" value="完好" />
+                <el-option label="轻微破损" value="轻微破损" />
+                <el-option label="中度破损" value="中度破损" />
+                <el-option label="严重破损" value="严重破损" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="备注">
+              <el-input v-model="slipMetadataForm.notes" type="textarea" :rows="2" placeholder="输入备注信息" />
+            </el-form-item>
+          </el-form>
+
+          <div class="action-buttons">
+            <el-button type="primary" @click="handleSaveSlipMetadata">保存元数据</el-button>
+          </div>
+        </div>
+
+        <!-- 单支裁剪图 -->
+        <div v-else-if="selectedNode && selectedNode.type === 'slip-crop'" class="content-section">
+          <div class="section-header">
+            <h3>单支裁剪图</h3>
+            <el-tag type="info">裁剪图像</el-tag>
+          </div>
+          <div v-if="selectedNode.storage_path" class="image-preview">
+            <img :src="getFullUrl(selectedNode.storage_path)" :alt="selectedNode.name" />
+          </div>
+          <p v-else class="no-image">暂无裁剪图</p>
         </div>
 
         <!-- 单支级别 -->
@@ -251,8 +308,10 @@ const treeProps = {
   label: (data) => {
     if (data.type === 'group') return data.name
     if (data.type === 'image') return data.filename
-    if (data.type === 'slip') return `单支 ${data.id.slice(0, 8)}`
-    return `单字 ${data.id.slice(0, 8)}`
+    if (data.type === 'slip-folder') return data.name
+    if (data.type === 'slip-crop') return data.name
+    if (data.type === 'char') return data.name
+    return data.name || data.id
   }
 }
 
@@ -261,7 +320,7 @@ const loadGroups = async () => {
     const data = await groupsAPI.getGroups()
     groups.value = data || []
 
-    // 构建树形数据
+    // 构建树形数据：新结构 - 组下直接显示原图，每个原图下显示其单支文件夹
     treeData.value = groups.value.map(group => ({
       id: `group-${group.id}`,
       type: 'group',
@@ -276,29 +335,7 @@ const loadGroups = async () => {
       total_images: group.total_images,
       processed_images: group.processed_images,
       count: group.total_images,
-      children: [
-        {
-          id: `images-${group.id}`,
-          type: 'images-folder',
-          name: '原始图像',
-          count: group.total_images,
-          children: [] // 延迟加载
-        },
-        {
-          id: `slips-${group.id}`,
-          type: 'slips-folder',
-          name: '单支',
-          count: 0,
-          children: []
-        },
-        {
-          id: `chars-${group.id}`,
-          type: 'chars-folder',
-          name: '单字',
-          count: 0,
-          children: []
-        }
-      ]
+      children: []  // 延迟加载：原图列表
     }))
   } catch (error) {
     handleApiError(error, '加载图像组失败')
@@ -307,11 +344,9 @@ const loadGroups = async () => {
 
 const handleNodeClick = async (data) => {
   if (data.type === 'group') {
-    selectedNode.value = data
-  } else if (data.type === 'images-folder') {
-    // 延迟加载原始图像
+    // 加载组下的原图列表
     if (data.children.length === 0) {
-      const groupId = data.id.replace('images-', '')
+      const groupId = data.id.replace('group-', '')
       try {
         const response = await groupsAPI.getGroupImages(groupId)
         const images = response.items || []
@@ -326,67 +361,97 @@ const handleNodeClick = async (data) => {
           format: img.format,
           file_size: img.file_size,
           group_id: img.group_id,
-          source_image_id: img.id
+          source_image_id: img.id,
+          children: []  // 延迟加载：该原图下的单支文件夹
         }))
         treeRef.value.updateKeyChildren(data.id, data.children)
       } catch (error) {
         handleApiError(error, '加载原始图像失败')
       }
     }
-  } else if (data.type === 'slips-folder') {
+    selectedNode.value = data
+  } else if (data.type === 'image') {
+    // 加载该原图下的单支文件夹
     if (data.children.length === 0) {
-      const groupId = data.id.replace('slips-', '')
+      const groupId = data.group_id || data.id.replace('image-', '').split('-')[0]
       try {
         const response = await groupsAPI.getGroupSegments(groupId, { type: 'slip' })
-        const slips = response || []
-        data.children = slips.map(slip => ({
+        const slips = (response || []).filter(s => s.source_image_id === data.source_image_id)
+        data.children = slips.map((slip, idx) => ({
           id: `slip-${slip.id}`,
-          type: 'slip',
-          name: `单支 ${slip.id.slice(0, 8)}`,
+          type: 'slip-folder',
+          name: `单支 ${idx + 1}`,
           segment_id: slip.id,
           source_image_id: slip.source_image_id,
+          slip_index: idx + 1,
           width: slip.bbox_width,
           height: slip.bbox_height,
           confidence: slip.confidence,
           validated: slip.validated,
+          storage_path: slip.storage_path,
           metadata: slip.metadata || {},
-          children: [{
-            id: `slips-chars-${slip.id}`,
-            type: 'slips-chars-folder',
-            name: '单字',
-            children: []
-          }]
+          children: []  // 第一项是单支裁剪图，后面是单字
         }))
         treeRef.value.updateKeyChildren(data.id, data.children)
       } catch (error) {
         handleApiError(error, '加载单支失败')
       }
     }
-  } else if (data.type === 'slips-chars-folder') {
+    selectedNode.value = data
+  } else if (data.type === 'slip-folder') {
+    // 加载单支文件夹的内容：第一项是单支裁剪图，后面是该单支的所有单字
     if (data.children.length === 0) {
-      const slipId = data.id.replace('slips-chars-', '')
-      const groupId = data.id.split('-')[1]
+      const groupId = data.group_id
       try {
-        const response = await groupsAPI.getGroupSegments(groupId, { type: 'char' })
-        const chars = (response || []).filter(c => c.source_image_id === slipId)
-        data.children = chars.map(char => ({
-          id: `char-${char.id}`,
-          type: 'char',
-          name: `单字 ${char.id.slice(0, 8)}`,
-          segment_id: char.id,
-          source_image_id: char.source_image_id,
-          width: char.bbox_width,
-          height: char.bbox_height,
-          confidence: char.confidence,
-          validated: char.validated,
-          metadata: char.metadata || {}
-        }))
+        // 获取该单支的详细信息
+        const segResponse = await groupsAPI.getGroupSegments(groupId, { type: 'slip' })
+        const slipData = (segResponse || []).find(s => s.id === data.segment_id)
+
+        // 获取该单支下的所有单字
+        const charResponse = await groupsAPI.getGroupSegments(groupId, { type: 'char' })
+        const chars = (charResponse || []).filter(c => c.parent_segment_id === data.segment_id)
+
+        // 构建子节点：第一项是单支裁剪图，后面是单字
+        const children = []
+
+        // 添加单支裁剪图作为第一项
+        if (slipData && slipData.storage_path) {
+          children.push({
+            id: `slip-crop-${slipData.id}`,
+            type: 'slip-crop',
+            name: '单支裁剪图',
+            storage_path: slipData.storage_path,
+            segment_id: slipData.id,
+            isSlipCrop: true
+          })
+        }
+
+        // 添加该单支的所有单字
+        chars.forEach((char, idx) => {
+          children.push({
+            id: `char-${char.id}`,
+            type: 'char',
+            name: `单字 ${idx + 1}`,
+            segment_id: char.id,
+            source_image_id: char.source_image_id,
+            parent_segment_id: char.parent_segment_id,
+            width: char.bbox_width,
+            height: char.bbox_height,
+            confidence: char.confidence,
+            validated: char.validated,
+            storage_path: char.storage_path,
+            metadata: char.metadata || {}
+          })
+        })
+
+        data.children = children
         treeRef.value.updateKeyChildren(data.id, data.children)
       } catch (error) {
         handleApiError(error, '加载单字失败')
       }
     }
-  } else if (data.type === 'image' || data.type === 'slip' || data.type === 'char') {
+    selectedNode.value = data
+  } else if (data.type === 'image' || data.type === 'slip-folder' || data.type === 'char' || data.type === 'slip-crop') {
     selectedNode.value = data
   }
 }
@@ -450,7 +515,7 @@ const handleSaveMetadata = () => {
 }
 
 const handleSaveSlipMetadata = async () => {
-  if (!selectedNode.value || selectedNode.value.type !== 'slip') return
+  if (!selectedNode.value || (selectedNode.value.type !== 'slip' && selectedNode.value.type !== 'slip-folder')) return
   try {
     await metadataAPI.saveSegmentMetadata(selectedNode.value.segment_id, {
       title: slipMetadataForm.value.slip_id,
