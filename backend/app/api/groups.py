@@ -9,6 +9,8 @@ from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
 from datetime import datetime
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from pathlib import Path
 from PIL import Image
 import io
@@ -16,6 +18,28 @@ import os
 import math
 
 from celery.result import AsyncResult
+
+# 创建带重试机制的 requests session（处理 SSL 问题）
+def create_requests_session() -> requests.Session:
+    """创建配置了重试和 SSL 适配器的 session"""
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('https://', adapter)
+    # SSL_VERIFY 环境变量控制验证，设为 false 可临时绕过 SSL 问题（仅诊断用）
+    import os
+    ssl_verify = os.getenv("SSL_VERIFY", "true").lower() != "false"
+    session.verify = ssl_verify
+    return session
+
+# 全局 session 实例
+_http_session = None
+
+def get_session() -> requests.Session:
+    global _http_session
+    if _http_session is None:
+        _http_session = create_requests_session()
+    return _http_session
 
 from app.models.groups import (
     ImageGroupCreate, ImageGroupUpdate, ImageGroupResponse,
@@ -151,7 +175,7 @@ async def create_group(
     headers = _auth_headers()
     headers["Prefer"] = "return=representation"
 
-    resp = requests.post(url, headers=headers, json=row)
+    resp = get_session().post(url, headers=headers, json=row)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -181,7 +205,7 @@ async def list_groups(user=Depends(get_current_user)):
         "order": "created_at.desc"
     }
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -208,7 +232,7 @@ async def get_group(
         "user_id": f"eq.{user_id}"  # 确保只能访问自己的组
     }
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -269,7 +293,7 @@ async def update_group(
         "user_id": f"eq.{user_id}"
     }
 
-    resp = requests.patch(url, headers=headers, params=params, json=update_data)
+    resp = get_session().patch(url, headers=headers, params=params, json=update_data)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -303,7 +327,7 @@ async def delete_group(
         "user_id": f"eq.{user_id}"
     }
 
-    resp = requests.delete(url, headers=headers, params=params)
+    resp = get_session().delete(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -332,7 +356,7 @@ async def preprocess_group(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -349,7 +373,7 @@ async def preprocess_group(
     # 更新组状态为 preprocessing
     update_url = f"{_base_url()}/rest/v1/image_groups"
     update_params = {"id": f"eq.{group_id}"}
-    requests.patch(
+    get_session().patch(
         update_url,
         headers=headers,
         params=update_params,
@@ -383,7 +407,7 @@ async def segment_slips(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -400,13 +424,13 @@ async def segment_slips(
     # 获取组内图像总数
     images_url = f"{_base_url()}/rest/v1/source_images"
     images_params = {"group_id": f"eq.{group_id}"}
-    images_resp = requests.get(images_url, headers=headers, params=images_params)
+    images_resp = get_session().get(images_url, headers=headers, params=images_params)
     total_images = len(images_resp.json()) if images_resp.status_code == 200 else 0
 
     # 更新组状态为 segmenting
     update_url = f"{_base_url()}/rest/v1/image_groups"
     update_params = {"id": f"eq.{group_id}"}
-    requests.patch(
+    get_session().patch(
         update_url,
         headers=headers,
         params=update_params,
@@ -440,7 +464,7 @@ async def segment_chars(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -457,13 +481,13 @@ async def segment_chars(
     # 获取组内图像总数
     images_url = f"{_base_url()}/rest/v1/source_images"
     images_params = {"group_id": f"eq.{group_id}"}
-    images_resp = requests.get(images_url, headers=headers, params=images_params)
+    images_resp = get_session().get(images_url, headers=headers, params=images_params)
     total_images = len(images_resp.json()) if images_resp.status_code == 200 else 0
 
     # 更新组状态为 segmenting
     update_url = f"{_base_url()}/rest/v1/image_groups"
     update_params = {"id": f"eq.{group_id}"}
-    requests.patch(
+    get_session().patch(
         update_url,
         headers=headers,
         params=update_params,
@@ -497,7 +521,7 @@ async def get_batch_progress(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -557,7 +581,7 @@ async def get_progress(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -609,7 +633,7 @@ async def batch_update_metadata(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -631,7 +655,7 @@ async def batch_update_metadata(
         # 先获取组内所有图像
         images_url = f"{_base_url()}/rest/v1/source_images"
         images_params = {"group_id": f"eq.{group_id}"}
-        images_resp = requests.get(images_url, headers=headers, params=images_params)
+        images_resp = get_session().get(images_url, headers=headers, params=images_params)
 
         if images_resp.status_code < 400:
             images_data = images_resp.json() or []
@@ -642,7 +666,7 @@ async def batch_update_metadata(
                 for img_id in image_ids:
                     update_url = f"{_base_url()}/rest/v1/slip_image_metadata"
                     update_params = {"image_id": f"eq.{img_id}"}
-                    requests.patch(
+                    get_session().patch(
                         update_url,
                         headers=headers,
                         params=update_params,
@@ -654,7 +678,7 @@ async def batch_update_metadata(
         # 先获取组内所有图像
         images_url = f"{_base_url()}/rest/v1/source_images"
         images_params = {"group_id": f"eq.{group_id}"}
-        images_resp = requests.get(images_url, headers=headers, params=images_params)
+        images_resp = get_session().get(images_url, headers=headers, params=images_params)
 
         if images_resp.status_code < 400:
             images_data = images_resp.json() or []
@@ -668,7 +692,7 @@ async def batch_update_metadata(
                         "image_id": f"eq.{img_id}",
                         "segment_type": f"eq.char"
                     }
-                    requests.patch(
+                    get_session().patch(
                         update_url,
                         headers=headers,
                         params=update_params,
@@ -698,7 +722,7 @@ async def export_group(
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -728,7 +752,7 @@ async def export_group(
     headers = _auth_headers()
     headers["Prefer"] = "return=representation"
 
-    resp = requests.post(export_url, headers=headers, json=export_row)
+    resp = get_session().post(export_url, headers=headers, json=export_row)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -772,7 +796,7 @@ async def export_group(
         # 更新导出记录为失败状态
         update_url = f"{_base_url()}/rest/v1/export_records"
         update_params = {"id": f"eq.{exp_row.get('id')}"}
-        requests.patch(
+        get_session().patch(
             update_url,
             headers=_auth_headers(),
             params=update_params,
@@ -809,7 +833,7 @@ async def export_group(
     # 获取更新后的导出记录
     final_url = f"{_base_url()}/rest/v1/export_records"
     final_params = {"id": f"eq.{exp_row.get('id')}"}
-    final_resp = requests.get(final_url, headers=_auth_headers(), params=final_params)
+    final_resp = get_session().get(final_url, headers=_auth_headers(), params=final_params)
     final_data = final_resp.json() if final_resp.status_code == 200 else []
     final_row = final_data[0] if final_data else exp_row
 
@@ -848,7 +872,7 @@ async def get_export_status(
         "user_id": f"eq.{user_id}"  # 确保只能访问自己的导出记录
     }
 
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -917,7 +941,7 @@ def _ensure_group_exists_and_owned(group_id: str, user_id: str) -> Dict[str, Any
     url = f"{_base_url()}/rest/v1/image_groups"
     headers = _auth_headers()
     params = {"id": f"eq.{group_id}", "user_id": f"eq.{user_id}"}
-    resp = requests.get(url, headers=headers, params=params)
+    resp = get_session().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1056,7 +1080,7 @@ async def upload_group_images(
             insert_url = f"{_base_url()}/rest/v1/source_images"
             insert_headers = _auth_headers()
             insert_headers["Prefer"] = "return=representation"
-            resp = requests.post(insert_url, headers=insert_headers, json=source_row)
+            resp = get_session().post(insert_url, headers=insert_headers, json=source_row)
             if resp.status_code >= 400:
                 errors.append(f"{file.filename}: 写入数据库失败 {resp.status_code}")
                 continue
@@ -1068,7 +1092,7 @@ async def upload_group_images(
             errors.append(f"{file.filename}: {str(e)}")
 
     # 重新查询 source_images 表总数（比 +N 更可靠，防止并发偏差）
-    count_result = requests.get(
+    count_result = get_session().get(
         f"{_base_url()}/rest/v1/source_images",
         headers=_auth_headers(),
         params={"group_id": f"eq.{group_id}", "select": "id"}
@@ -1076,7 +1100,7 @@ async def upload_group_images(
     total = len(count_result.json()) if count_result.status_code < 400 and count_result.json() else 0
     update_url = f"{_base_url()}/rest/v1/image_groups"
     update_params = {"id": f"eq.{group_id}"}
-    requests.patch(
+    get_session().patch(
         update_url,
         headers=_auth_headers(),
         params=update_params,
@@ -1109,7 +1133,7 @@ async def list_group_images(
     # 查询总数
     count_url = f"{_base_url()}/rest/v1/source_images"
     count_params = {"group_id": f"eq.{group_id}", "select": "id"}
-    count_resp = requests.get(count_url, headers=_auth_headers(), params=count_params)
+    count_resp = get_session().get(count_url, headers=_auth_headers(), params=count_params)
     total = len(count_resp.json()) if count_resp.status_code < 400 and count_resp.json() else 0
 
     # 分页查询
@@ -1123,7 +1147,7 @@ async def list_group_images(
         "offset": str(offset),
         "limit": str(page_size)
     }
-    resp = requests.get(list_url, headers=_auth_headers(), params=list_params)
+    resp = get_session().get(list_url, headers=_auth_headers(), params=list_params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1161,7 +1185,7 @@ async def delete_group_image(
     # 查询图片是否存在
     url = f"{_base_url()}/rest/v1/source_images"
     params = {"id": f"eq.{image_id}", "group_id": f"eq.{group_id}"}
-    resp = requests.get(url, headers=_auth_headers(), params=params)
+    resp = get_session().get(url, headers=_auth_headers(), params=params)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1187,7 +1211,7 @@ async def delete_group_image(
     # 从数据库删除
     del_url = f"{_base_url()}/rest/v1/source_images"
     del_params = {"id": f"eq.{image_id}"}
-    del_resp = requests.delete(del_url, headers=_auth_headers(), params=del_params)
+    del_resp = get_session().delete(del_url, headers=_auth_headers(), params=del_params)
     if del_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1195,7 +1219,7 @@ async def delete_group_image(
         )
 
     # 重新查询 source_images 表总数（防止并发偏差）
-    count_result = requests.get(
+    count_result = get_session().get(
         f"{_base_url()}/rest/v1/source_images",
         headers=_auth_headers(),
         params={"group_id": f"eq.{group_id}", "select": "id"}
@@ -1203,7 +1227,7 @@ async def delete_group_image(
     total = len(count_result.json()) if count_result.status_code < 400 and count_result.json() else 0
     update_url = f"{_base_url()}/rest/v1/image_groups"
     update_params = {"id": f"eq.{group_id}"}
-    requests.patch(
+    get_session().patch(
         update_url,
         headers=_auth_headers(),
         params=update_params,
@@ -1230,7 +1254,7 @@ async def get_group_image_file(
     # 查询图片信息获取格式
     url = f"{_base_url()}/rest/v1/source_images"
     params = {"id": f"eq.{image_id}", "group_id": f"eq.{group_id}"}
-    resp = requests.get(url, headers=_auth_headers(), params=params)
+    resp = get_session().get(url, headers=_auth_headers(), params=params)
     if resp.status_code >= 400 or not resp.json():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1276,7 +1300,7 @@ async def get_group_image_thumbnail(
     # 查询图片信息获取格式
     url = f"{_base_url()}/rest/v1/source_images"
     params = {"id": f"eq.{image_id}", "group_id": f"eq.{group_id}"}
-    resp = requests.get(url, headers=_auth_headers(), params=params)
+    resp = get_session().get(url, headers=_auth_headers(), params=params)
     if resp.status_code >= 400 or not resp.json():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1367,7 +1391,7 @@ async def list_group_segments(
     # 首先获取组内所有源图像ID
     images_url = f"{_base_url()}/rest/v1/source_images"
     images_params = {"group_id": f"eq.{group_id}", "select": "id"}
-    images_resp = requests.get(images_url, headers=_auth_headers(), params=images_params)
+    images_resp = get_session().get(images_url, headers=_auth_headers(), params=images_params)
     if images_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1397,7 +1421,7 @@ async def list_group_segments(
     if source_image_id:
         segments_params["source_image_id"] = f"eq.{source_image_id}"
 
-    segments_resp = requests.get(segments_url, headers=_auth_headers(), params=segments_params)
+    segments_resp = get_session().get(segments_url, headers=_auth_headers(), params=segments_params)
     if segments_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1432,7 +1456,7 @@ async def create_group_segment(
     # 验证 source_image_id 属于该组
     source_img_url = f"{_base_url()}/rest/v1/source_images"
     source_img_params = {"id": f"eq.{data.source_image_id}", "group_id": f"eq.{group_id}"}
-    source_img_resp = requests.get(source_img_url, headers=_auth_headers(), params=source_img_params)
+    source_img_resp = get_session().get(source_img_url, headers=_auth_headers(), params=source_img_params)
     if source_img_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1454,7 +1478,7 @@ async def create_group_segment(
         "order": "segment_index.desc",
         "limit": "1"
     }
-    max_index_resp = requests.get(max_index_url, headers=_auth_headers(), params=max_index_params)
+    max_index_resp = get_session().get(max_index_url, headers=_auth_headers(), params=max_index_params)
     next_index = 0
     if max_index_resp.status_code == 200 and max_index_resp.json():
         next_index = (max_index_resp.json()[0].get("segment_index", 0) or 0) + 1
@@ -1478,7 +1502,7 @@ async def create_group_segment(
     insert_headers = _auth_headers()
     insert_headers["Prefer"] = "return=representation"
 
-    resp = requests.post(insert_url, headers=insert_headers, json=segment_row)
+    resp = get_session().post(insert_url, headers=insert_headers, json=segment_row)
     if resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1518,7 +1542,7 @@ async def update_group_segment(
     # 验证 segment 属于该组（通过 source_images 连接）
     seg_url = f"{_base_url()}/rest/v1/segments"
     seg_params = {"id": f"eq.{segment_id}"}
-    seg_resp = requests.get(seg_url, headers=_auth_headers(), params=seg_params)
+    seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
     if seg_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1537,7 +1561,7 @@ async def update_group_segment(
     # 验证 source_image 属于该组
     img_url = f"{_base_url()}/rest/v1/source_images"
     img_params = {"id": f"eq.{source_image_id}", "group_id": f"eq.{group_id}"}
-    img_resp = requests.get(img_url, headers=_auth_headers(), params=img_params)
+    img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
     if img_resp.status_code >= 400 or not img_resp.json():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1566,7 +1590,7 @@ async def update_group_segment(
     update_headers["Prefer"] = "return=representation"
     update_params = {"id": f"eq.{segment_id}"}
 
-    update_resp = requests.patch(update_url, headers=update_headers, params=update_params, json=update_data)
+    update_resp = get_session().patch(update_url, headers=update_headers, params=update_params, json=update_data)
     if update_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1601,7 +1625,7 @@ async def delete_group_segment(
     # 验证 segment 属于该组
     seg_url = f"{_base_url()}/rest/v1/segments"
     seg_params = {"id": f"eq.{segment_id}"}
-    seg_resp = requests.get(seg_url, headers=_auth_headers(), params=seg_params)
+    seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
     if seg_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1620,7 +1644,7 @@ async def delete_group_segment(
     # 验证 source_image 属于该组
     img_url = f"{_base_url()}/rest/v1/source_images"
     img_params = {"id": f"eq.{source_image_id}", "group_id": f"eq.{group_id}"}
-    img_resp = requests.get(img_url, headers=_auth_headers(), params=img_params)
+    img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
     if img_resp.status_code >= 400 or not img_resp.json():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1630,7 +1654,7 @@ async def delete_group_segment(
     # 删除片段记录
     del_url = f"{_base_url()}/rest/v1/segments"
     del_params = {"id": f"eq.{segment_id}"}
-    del_resp = requests.delete(del_url, headers=_auth_headers(), params=del_params)
+    del_resp = get_session().delete(del_url, headers=_auth_headers(), params=del_params)
     if del_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1666,7 +1690,7 @@ async def batch_delete_group_segments(
             # 验证 segment 属于该组
             seg_url = f"{_base_url()}/rest/v1/segments"
             seg_params = {"id": f"eq.{segment_id}"}
-            seg_resp = requests.get(seg_url, headers=_auth_headers(), params=seg_params)
+            seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
             if seg_resp.status_code >= 400:
                 errors.append({"segment_id": segment_id, "error": f"查询失败：{seg_resp.status_code}"})
                 continue
@@ -1681,7 +1705,7 @@ async def batch_delete_group_segments(
             # 验证 source_image 属于该组
             img_url = f"{_base_url()}/rest/v1/source_images"
             img_params = {"id": f"eq.{source_image_id}", "group_id": f"eq.{group_id}"}
-            img_resp = requests.get(img_url, headers=_auth_headers(), params=img_params)
+            img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
             if img_resp.status_code >= 400 or not img_resp.json():
                 errors.append({"segment_id": segment_id, "error": "片段不属于该图像组"})
                 continue
@@ -1689,7 +1713,7 @@ async def batch_delete_group_segments(
             # 删除片段记录
             del_url = f"{_base_url()}/rest/v1/segments"
             del_params = {"id": f"eq.{segment_id}"}
-            del_resp = requests.delete(del_url, headers=_auth_headers(), params=del_params)
+            del_resp = get_session().delete(del_url, headers=_auth_headers(), params=del_params)
             if del_resp.status_code >= 400:
                 errors.append({"segment_id": segment_id, "error": f"删除失败：{del_resp.status_code}"})
             else:
@@ -1736,7 +1760,7 @@ async def validate_group_segments(
         # 验证 image_id 属于该组
         img_url = f"{_base_url()}/rest/v1/source_images"
         img_params = {"id": f"eq.{request.image_id}", "group_id": f"eq.{group_id}"}
-        img_resp = requests.get(img_url, headers=_auth_headers(), params=img_params)
+        img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
         if img_resp.status_code >= 400 or not img_resp.json():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1746,7 +1770,7 @@ async def validate_group_segments(
         # 验证该图像所有片段
         seg_url = f"{_base_url()}/rest/v1/segments"
         seg_params = {"source_image_id": f"eq.{request.image_id}"}
-        seg_resp = requests.get(seg_url, headers=_auth_headers(), params=seg_params)
+        seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
         if seg_resp.status_code >= 400:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1764,7 +1788,7 @@ async def validate_group_segments(
 
         for sid in segment_ids:
             update_params = {"id": f"eq.{sid}"}
-            upd_resp = requests.patch(update_url, headers=update_headers, params=update_params, json={"validated": True})
+            upd_resp = get_session().patch(update_url, headers=update_headers, params=update_params, json={"validated": True})
             if upd_resp.status_code < 400:
                 updated_count += 1
 
@@ -1773,7 +1797,7 @@ async def validate_group_segments(
         for segment_id in request.segment_ids:
             seg_url = f"{_base_url()}/rest/v1/segments"
             seg_params = {"id": f"eq.{segment_id}"}
-            seg_resp = requests.get(seg_url, headers=_auth_headers(), params=seg_params)
+            seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
             if seg_resp.status_code >= 400 or not seg_resp.json():
                 continue
 
@@ -1783,14 +1807,14 @@ async def validate_group_segments(
             # 验证 source_image 属于该组
             img_url = f"{_base_url()}/rest/v1/source_images"
             img_params = {"id": f"eq.{source_image_id}", "group_id": f"eq.{group_id}"}
-            img_resp = requests.get(img_url, headers=_auth_headers(), params=img_params)
+            img_resp = get_session().get(img_url, headers=_auth_headers(), params=img_params)
             if img_resp.status_code >= 400 or not img_resp.json():
                 continue
 
             # 更新验证状态
             update_url = f"{_base_url()}/rest/v1/segments"
             update_params = {"id": f"eq.{segment_id}"}
-            upd_resp = requests.patch(update_url, headers=_auth_headers(), params=update_params, json={"validated": True})
+            upd_resp = get_session().patch(update_url, headers=_auth_headers(), params=update_params, json={"validated": True})
             if upd_resp.status_code < 400:
                 updated_count += 1
 
@@ -1820,7 +1844,7 @@ async def get_validation_status(
     # 获取组内所有源图像
     images_url = f"{_base_url()}/rest/v1/source_images"
     images_params = {"group_id": f"eq.{group_id}", "select": "id"}
-    images_resp = requests.get(images_url, headers=_auth_headers(), params=images_params)
+    images_resp = get_session().get(images_url, headers=_auth_headers(), params=images_params)
     if images_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1841,7 +1865,7 @@ async def get_validation_status(
     segment_ids_str = ",".join(image_ids)
     seg_url = f"{_base_url()}/rest/v1/segments"
     seg_params = {"source_image_id": f"in.({segment_ids_str})"}
-    seg_resp = requests.get(seg_url, headers=_auth_headers(), params=seg_params)
+    seg_resp = get_session().get(seg_url, headers=_auth_headers(), params=seg_params)
     if seg_resp.status_code >= 400:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
