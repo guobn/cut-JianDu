@@ -542,8 +542,10 @@ class SegmentationService:
         import logging
         log = logging.getLogger(__name__)
 
-        # 根据模型类型选择对应的置信度阈值
-        if params.model_type == ModelType.YOLOV11_FINETUNED:
+        # 根据模型类型选择对应的置信度阈值（优先使用 params 指定的值）
+        if params.confidence_threshold is not None:
+            conf_threshold = params.confidence_threshold
+        elif params.model_type == ModelType.YOLOV11_FINETUNED:
             conf_threshold = getattr(settings, "yolov11_finetuned_conf_threshold", 0.4)
         else:
             conf_threshold = getattr(settings, "yolov8_slip_conf_threshold", 0.01)

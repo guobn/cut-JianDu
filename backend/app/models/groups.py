@@ -136,10 +136,10 @@ class PreprocessConfig(BaseModel):
 
 class SegmentConfig(BaseModel):
     """切割配置"""
-    model_type: str = Field(default="yolov8", description="模型类型: yolov8/yolov11-finetuned/opencv/auto")
+    model_type: str = Field(default="yolov11-finetuned", description="模型类型: yolov8/yolov11-finetuned/opencv/auto")
     sahi_slice_size: int = Field(default=640, ge=320, le=1280, description="SAHI切片大小")
     sahi_overlap_ratio: float = Field(default=0.2, ge=0, le=0.5, description="SAHI重叠比例")
-    confidence_threshold: float = Field(default=0.5, ge=0.1, le=0.9, description="置信度阈值")
+    confidence_threshold: float = Field(default=0.4, ge=0.1, le=0.9, description="置信度阈值（yolov11-finetuned推荐0.4）")
     min_char_distance: Optional[int] = Field(None, description="最小字符间距像素")
     # 检测过滤参数（与 Segmentation 页面保持一致）
     min_width: int = Field(default=20, ge=1, description="最小宽度")

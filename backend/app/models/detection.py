@@ -33,6 +33,7 @@ class DetectionParameters(BaseModel):
     edge_sensitivity: float = Field(0.5, ge=0, le=1, description="边缘检测灵敏度")
     background_type: str = Field("white", description="背景类型")
     model_type: ModelType = Field(ModelType.YOLOV8, description="检测模型类型")
+    confidence_threshold: Optional[float] = Field(None, description="置信度阈值（None则用模型默认值）")
 
 
 class DetectionResult(BaseModel):
