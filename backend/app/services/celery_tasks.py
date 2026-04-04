@@ -12,7 +12,7 @@ import requests
 from celery import group
 
 from app.worker import celery_app
-from app.models.detection import BoundingBox, DetectionParameters, DetectionResult
+from app.models.detection import BoundingBox, DetectionParameters, DetectionResult, ModelType
 from app.models.rotation import RotationDetectionResult, RotationCorrectionResult
 from app.services.segmentation_service import SegmentationService
 from app.services.rotation_service import RotationService
@@ -31,14 +31,20 @@ _image_service = None
 
 
 def _clean_detection_config(config: dict) -> dict:
-    """过滤 DetectionParameters 不接受的无效值（如 model_type='auto'）"""
+    """转换 SegmentConfig 参数为 DetectionParameters 格式"""
     if not config:
         return {}
     # 复制避免修改原字典
     cleaned = {k: v for k, v in config.items()}
-    # model_type 'auto' 不是有效的 ModelType 枚举值，移除它让参数使用默认值
-    if cleaned.get("model_type") == "auto":
-        cleaned.pop("model_type")
+
+    # 转换 model_type 字符串为枚举值
+    model_type_str = cleaned.get("model_type", "")
+    if model_type_str == "yolov11-finetuned":
+        cleaned["model_type"] = ModelType.YOLOV11_FINETUNED
+    elif model_type_str in ("yolov8", "auto", "opencv", ""):
+        # 'auto' 和 'opencv' 使用默认的 YOLOV8
+        cleaned["model_type"] = ModelType.YOLOV8
+
     return cleaned
 
 
