@@ -213,7 +213,7 @@ class SegmentUpdate(BaseModel):
 class SegmentResponse(BaseModel):
     """片段响应"""
     id: str
-    image_id: str
+    image_id: Optional[str]
     source_image_id: Optional[str]
     segment_index: int
     segment_type: str
