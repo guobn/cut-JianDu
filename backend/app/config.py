@@ -7,7 +7,7 @@ import os
 class Settings(BaseSettings):
     """应用配置"""
     # 基础配置
-    app_name: str = "古文字简牍图像处理系统"
+    app_name: str = "基于云存储的简牍图片切割及管理系统的设计与实现"
     app_version: str = "1.0.0"
     debug: bool = True
     env: str = "dev"

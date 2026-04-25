@@ -69,7 +69,7 @@ app.mount("/results", StaticFiles(directory=settings.result_dir), name="results"
 @app.get("/")
 def read_root():
     return {
-        "message": "古文字简牍图像处理 API",
+        "message": f"{settings.app_name} API",
         "version": settings.app_version,
         "status": "running"
     }
