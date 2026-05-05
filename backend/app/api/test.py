@@ -1,22 +1,27 @@
 """
-测试 API 路由 - 无需鉴权，用于快速测试核心功能
+Test API routes without authentication, used for local verification.
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse
-from typing import Optional, List
 from datetime import datetime
+from pathlib import Path
+import json
+import time
 import uuid
+from typing import Optional
 
-from app.models.image import ImageUploadResponse
-from app.models.detection import DetectionRequest, DetectionResult
-from app.models.rotation import RotationDetectionResult, RotationCorrectionResult
-from app.models.normalization import NormalizationRequest, NormalizationResult
-from app.services.image_service import ImageService
-from app.services.segmentation_service import SegmentationService
-from app.services.rotation_service import RotationService
-from app.services.normalization_service import NormalizationService
-from app.utils.file_utils import FileManager
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
 from app.config import settings
+from app.models.detection import BoundingBox, DetectionParameters, DetectionResult, ModelType
+from app.models.image import ImageUploadResponse
+from app.models.normalization import NormalizationResult
+from app.models.rotation import RotationCorrectionResult, RotationDetectionResult
+from app.services.image_service import ImageService
+from app.services.normalization_service import NormalizationService
+from app.services.rotation_service import RotationService
+from app.services.segmentation_service import SegmentationService
+from app.utils.file_utils import FileManager
+from app.utils.image_utils import ImageProcessor
 
 router = APIRouter(prefix="/api/test", tags=["test"])
 
@@ -26,19 +31,38 @@ rotation_service = RotationService()
 normalization_service = NormalizationService()
 
 
+def _build_detection_params(mode: str, model_type: Optional[str]) -> DetectionParameters:
+    if mode == "single-character":
+        params = DetectionParameters(
+            min_width=20,
+            min_height=20,
+            max_width=150,
+            max_height=150,
+            aspect_ratio_min=0.3,
+            aspect_ratio_max=3.0,
+        )
+    else:
+        params = DetectionParameters()
+
+    if model_type:
+        try:
+            params.model_type = ModelType(model_type)
+        except ValueError:
+            pass
+
+    return params
+
+
 @router.post("/upload", response_model=ImageUploadResponse)
 async def test_upload_image(file: UploadFile = File(...)):
-    """
-    测试图像上传（无需鉴权）
-    """
     if not FileManager.is_valid_image_format(file.filename):
         raise HTTPException(
             status_code=400,
             detail={
                 "error_code": "INVALID_FORMAT",
-                "error_message": "不支持的图像格式",
-                "suggested_solution": "请上传 JPG、PNG、TIFF 或 BMP 格式的图像"
-            }
+                "error_message": "Unsupported image format",
+                "suggested_solution": "Please upload JPG, PNG, TIFF, or BMP files",
+            },
         )
 
     content = await file.read()
@@ -49,30 +73,29 @@ async def test_upload_image(file: UploadFile = File(...)):
             status_code=413,
             detail={
                 "error_code": "FILE_TOO_LARGE",
-                "error_message": "文件大小超过限制",
-                "suggested_solution": f"请上传小于 {settings.max_file_size // (1024*1024)}MB 的图像文件"
-            }
+                "error_message": "File size exceeds limit",
+                "suggested_solution": f"Please upload files smaller than {settings.max_file_size // (1024 * 1024)} MB",
+            },
         )
 
     image_id = f"test_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     try:
-        image_info = await image_service.save_image(
+        return await image_service.save_image(
             image_id=image_id,
             filename=file.filename,
             content=content,
-            content_type=file.content_type
+            content_type=file.content_type,
         )
-        return image_info
-    except Exception as e:
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "error_code": "UPLOAD_FAILED",
-                "error_message": f"图像上传失败：{str(e)}",
-                "suggested_solution": "请检查图像文件是否损坏，然后重试"
-            }
-        )
+                "error_message": f"Image upload failed: {exc}",
+                "suggested_solution": "Please check the input file and retry",
+            },
+        ) from exc
 
 
 @router.post("/detect", response_model=DetectionResult)
@@ -81,50 +104,43 @@ async def test_detect(
     mode: str = Form("single-slip"),
     model_type: Optional[str] = Form(None),
 ):
-    """
-    测试检测功能（无需鉴权）
-
-    mode: 'single-slip' 或 'single-character'
-    model_type: 模型类型（可选）
-    """
     try:
         content = await file.read()
-
-        # 保存临时图像
         image_id = f"test_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
         await image_service.save_image(
             image_id=image_id,
             filename=file.filename,
             content=content,
-            content_type=file.content_type
+            content_type=file.content_type,
         )
 
-        # 执行检测
         image = image_service.load_image(image_id)
+        params = _build_detection_params(mode, model_type)
+        start_time = time.time()
 
         if mode == "single-slip":
-            result = segmentation_service.detect_single_slips(
-                image=image,
-                image_id=image_id,
-                model_type=model_type
-            )
+            detections = segmentation_service.detect_single_slips(image=image, params=params)
         else:
-            result = segmentation_service.detect_single_characters(
-                image=image,
-                image_id=image_id,
-                model_type=model_type
-            )
+            detections = segmentation_service.detect_single_characters(image=image, params=params)
 
-        return result
-    except Exception as e:
+        return DetectionResult(
+            detection_id=f"det_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}",
+            image_id=image_id,
+            mode=mode,
+            detections=detections,
+            parameters=params.model_dump(mode="json"),
+            total_count=len(detections),
+            processing_time=time.time() - start_time,
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "error_code": "DETECTION_FAILED",
-                "error_message": f"检测失败：{str(e)}",
-                "suggested_solution": "请检查图像质量和参数设置"
-            }
-        )
+                "error_message": f"Detection failed: {exc}",
+                "suggested_solution": "Please check image quality and model configuration",
+            },
+        ) from exc
 
 
 @router.post("/cut")
@@ -133,76 +149,73 @@ async def test_cut(
     bounding_boxes: str = Form(...),
     segment_type: str = Form("slip"),
 ):
-    """
-    测试切割功能（无需鉴权）
-
-    bounding_boxes: JSON 字符串，格式 [{"x":0,"y":0,"width":100,"height":100,"confidence":0.9}]
-    segment_type: 'slip' 或 'char'
-    """
     try:
-        import json
-        boxes = json.loads(bounding_boxes)
-
-        # 加载图像
+        box_dicts = json.loads(bounding_boxes)
+        parsed_boxes = [BoundingBox(**box) for box in box_dicts]
         image = image_service.load_image(image_id)
 
-        # 执行切割
-        results = segmentation_service.cut_image_regions(
+        regions = segmentation_service.extract_regions(
             image=image,
-            image_id=image_id,
-            bounding_boxes=boxes,
-            segment_type=segment_type,
+            bounding_boxes=parsed_boxes,
+            add_padding=False,
+            padding_size=10,
+        )
+        output_dir = Path(settings.result_dir) / f"test_{segment_type}" / image_id
+        results = await segmentation_service.save_segmented_regions(
+            regions=regions,
+            bounding_boxes=parsed_boxes,
+            output_dir=output_dir,
             output_format="png",
-            user_id="test_user"
+            prefix=image_id,
         )
 
         return {
             "success": True,
-            "message": f"成功切割 {len(results)} 个区域",
-            "results": results
+            "message": f"Successfully cut {len(results)} regions",
+            "results": results,
         }
-    except Exception as e:
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "error_code": "CUT_FAILED",
-                "error_message": f"切割失败：{str(e)}",
-                "suggested_solution": "请检查边界框参数是否正确"
-            }
-        )
+                "error_message": f"Cut failed: {exc}",
+                "suggested_solution": "Please check bounding box parameters",
+            },
+        ) from exc
 
 
 @router.post("/rotation/detect", response_model=RotationDetectionResult)
 async def test_detect_rotation(file: UploadFile = File(...)):
-    """
-    测试旋转角度检测（无需鉴权）
-    """
     try:
         content = await file.read()
-
-        # 保存临时图像
         image_id = f"test_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
         await image_service.save_image(
             image_id=image_id,
             filename=file.filename,
             content=content,
-            content_type=file.content_type
+            content_type=file.content_type,
         )
 
-        # 检测旋转角度
         image = image_service.load_image(image_id)
-        result = rotation_service.detect_rotation_angle(image)
+        start_time = time.time()
+        detected_angle, confidence = rotation_service.detect_rotation_angle(image)
 
-        return result
-    except Exception as e:
+        return RotationDetectionResult(
+            image_id=image_id,
+            detected_angle=detected_angle,
+            confidence=confidence,
+            processing_time=time.time() - start_time,
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "error_code": "ROTATION_DETECT_FAILED",
-                "error_message": f"检测失败：{str(e)}",
-                "suggested_solution": "请检查图像质量"
-            }
-        )
+                "error_message": f"Rotation detection failed: {exc}",
+                "suggested_solution": "Please check the input image",
+            },
+        ) from exc
 
 
 @router.post("/rotation/correct", response_model=RotationCorrectionResult)
@@ -211,45 +224,53 @@ async def test_correct_rotation(
     angle: Optional[float] = Form(None),
     auto_crop: bool = Form(True),
 ):
-    """
-    测试旋转校正（无需鉴权）
-    """
     try:
         content = await file.read()
-
-        # 保存临时图像
         image_id = f"test_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
         await image_service.save_image(
             image_id=image_id,
             filename=file.filename,
             content=content,
-            content_type=file.content_type
+            content_type=file.content_type,
         )
 
-        # 执行旋转校正
         image = image_service.load_image(image_id)
-
+        start_time = time.time()
         if angle is None:
-            # 自动检测角度
-            detection_result = rotation_service.detect_rotation_angle(image)
-            angle = detection_result.angle
+            angle, _ = rotation_service.detect_rotation_angle(image)
 
-        result = rotation_service.correct_rotation(
+        corrected_image, corrected_angle = rotation_service.correct_rotation(
             image=image,
+            auto_detect=False,
             angle=angle,
-            auto_crop=auto_crop
+            auto_crop=auto_crop,
         )
 
-        return result
-    except Exception as e:
+        correction_id = f"rot_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        output_dir = Path(settings.result_dir) / "rotations"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{correction_id}.png"
+        ImageProcessor.save_image(corrected_image, output_path)
+
+        return RotationCorrectionResult(
+            correction_id=correction_id,
+            image_id=image_id,
+            original_angle=angle,
+            corrected_angle=corrected_angle,
+            output_path=str(output_path),
+            width=corrected_image.shape[1],
+            height=corrected_image.shape[0],
+            processing_time=time.time() - start_time,
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "error_code": "ROTATION_CORRECT_FAILED",
-                "error_message": f"校正失败：{str(e)}",
-                "suggested_solution": "请检查参数设置"
-            }
-        )
+                "error_message": f"Rotation correction failed: {exc}",
+                "suggested_solution": "Please check the input parameters",
+            },
+        ) from exc
 
 
 @router.post("/normalization/normalize", response_model=NormalizationResult)
@@ -260,86 +281,85 @@ async def test_normalize(
     keep_aspect_ratio: bool = Form(True),
     padding_color: str = Form("white"),
 ):
-    """
-    测试尺寸归一化（无需鉴权）
-    """
     try:
         content = await file.read()
-
-        # 保存临时图像
         image_id = f"test_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
         await image_service.save_image(
             image_id=image_id,
             filename=file.filename,
             content=content,
-            content_type=file.content_type
+            content_type=file.content_type,
         )
 
-        # 执行归一化
         image = image_service.load_image(image_id)
-
-        result = normalization_service.normalize_size(
+        start_time = time.time()
+        normalized_image = normalization_service.normalize_size(
             image=image,
             target_width=target_width,
             target_height=target_height,
             keep_aspect_ratio=keep_aspect_ratio,
-            padding_color=padding_color
+            padding_color=padding_color,
         )
 
-        return result
-    except Exception as e:
+        normalization_id = f"norm_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        output_dir = Path(settings.result_dir) / "normalized"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{normalization_id}.png"
+        ImageProcessor.save_image(normalized_image, output_path)
+
+        return NormalizationResult(
+            normalization_id=normalization_id,
+            image_id=image_id,
+            original_width=image.shape[1],
+            original_height=image.shape[0],
+            target_width=target_width,
+            target_height=target_height,
+            output_path=str(output_path),
+            processing_time=time.time() - start_time,
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
                 "error_code": "NORMALIZATION_FAILED",
-                "error_message": f"归一化失败：{str(e)}",
-                "suggested_solution": "请检查参数设置"
-            }
-        )
+                "error_message": f"Normalization failed: {exc}",
+                "suggested_solution": "Please check the input parameters",
+            },
+        ) from exc
 
 
 @router.get("/image/{image_id}")
 async def test_get_image(image_id: str):
-    """
-    获取测试图像（无需鉴权）
-    """
     try:
         file_path = image_service.get_image_path(image_id)
-
-        ext = file_path.suffix.lower()
         media_type_map = {
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.tiff': 'image/tiff',
-            '.tif': 'image/tiff',
-            '.bmp': 'image/bmp'
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".tiff": "image/tiff",
+            ".tif": "image/tiff",
+            ".bmp": "image/bmp",
         }
-        media_type = media_type_map.get(ext, 'image/jpeg')
-
         return FileResponse(
             path=file_path,
-            media_type=media_type,
-            filename=file_path.name
+            media_type=media_type_map.get(file_path.suffix.lower(), "image/jpeg"),
+            filename=file_path.name,
         )
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
             detail={
                 "error_code": "IMAGE_NOT_FOUND",
-                "error_message": f"图像不存在：{image_id}",
-                "suggested_solution": "请检查图像 ID 是否正确"
-            }
-        )
+                "error_message": f"Image not found: {image_id}",
+                "suggested_solution": "Please check whether the image_id is correct",
+            },
+        ) from exc
 
 
 @router.get("/health")
 async def test_health():
-    """
-    健康检查
-    """
     return {
         "status": "ok",
-        "message": "测试 API 运行正常",
-        "timestamp": datetime.now().isoformat()
+        "message": "Test API is running normally",
+        "timestamp": datetime.now().isoformat(),
     }

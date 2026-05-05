@@ -384,6 +384,27 @@ def _write_segment_to_supabase(segment_data: dict) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+def _write_segments_to_supabase_bulk(segments_data: List[dict]) -> List[dict]:
+    """批量写入 segments 记录，减少单字切割阶段的逐条网络开销。"""
+    if not segments_data:
+        return []
+
+    base_url = settings.supabase_url.rstrip("/")
+    headers = {
+        "apikey": settings.supabase_service_key,
+        "Authorization": f"Bearer {settings.supabase_service_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    url = f"{base_url}/rest/v1/segments"
+    clean_data = [{k: v for k, v in segment.items() if v is not None} for segment in segments_data]
+    resp = _get_session().post(url, headers=headers, json=clean_data)
+    if resp.status_code >= 400:
+        log.error("批量写入片段失败: %s %s", resp.status_code, resp.text[:200])
+        return []
+    return resp.json() or []
+
+
 def _crop_and_save_segment(
     image: np.ndarray,
     bbox: BoundingBox,
@@ -609,6 +630,8 @@ def batch_segment_chars_task(self, group_id: str, config: dict) -> dict:
             slip_origin_x = int(slip["bbox_x"])
             slip_origin_y = int(slip["bbox_y"])
 
+            segment_batch = []
+
             for idx, bbox in enumerate(char_boxes):
                 # 字符坐标转换回原图坐标系
                 abs_x = slip_origin_x + int(bbox.x)
@@ -625,7 +648,7 @@ def batch_segment_chars_task(self, group_id: str, config: dict) -> dict:
                     parent_id=slip_id
                 )
 
-                segment_data = {
+                segment_batch.append({
                     "source_image_id": image_id,
                     "segment_type": "char",
                     "segment_index": idx,
@@ -637,8 +660,17 @@ def batch_segment_chars_task(self, group_id: str, config: dict) -> dict:
                     "confidence": float(bbox.confidence) if hasattr(bbox, "confidence") and bbox.confidence else None,
                     "storage_path": str(char_local_path) if char_local_path else None,
                     "validated": False,
-                }
-                _write_segment_to_supabase(segment_data)
+                })
+
+            if segment_batch:
+                inserted = _write_segments_to_supabase_bulk(segment_batch)
+                if len(inserted) != len(segment_batch):
+                    log.warning(
+                        "单字批量写入数量不一致: slip_id=%s expected=%s actual=%s",
+                        slip_id,
+                        len(segment_batch),
+                        len(inserted),
+                    )
 
             completed += 1
 
