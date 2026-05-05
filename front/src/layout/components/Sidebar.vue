@@ -11,6 +11,12 @@
       :collapse-transition="false"
     >
       <div v-if="!isCollapsed" class="sidebar__group">核心功能</div>
+
+      <el-menu-item index="/preprocess">
+        <el-icon><MagicStick /></el-icon>
+        <span>图像预处理</span>
+      </el-menu-item>
+
       <el-menu-item index="/groups">
         <el-icon><FolderOpened /></el-icon>
         <span>图像组管理</span>
@@ -28,7 +34,7 @@
 
       <el-menu-item index="/recognition">
         <el-icon><EditPen /></el-icon>
-        <span>图像预处理</span>
+        <span>旧版预处理</span>
       </el-menu-item>
 
       <el-menu-item index="/metadata">
@@ -38,10 +44,9 @@
 
       <el-menu-item index="/detail">
         <el-icon><View /></el-icon>
-        <span>简牍图像展示和管理</span>
+        <span>简牍图像详情</span>
       </el-menu-item>
-
-      </el-menu>
+    </el-menu>
   </div>
 </template>
 
@@ -51,16 +56,16 @@ import { useRoute } from 'vue-router'
 import {
   EditPen,
   Files,
+  FolderOpened,
+  MagicStick,
   Scissor,
-  View,
-  FolderOpened
+  View
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
 
 const activeMenu = computed(() => route.path)
 
-// Check if sidebar should be collapsed (mobile)
 const isCollapsed = computed(() => {
   if (typeof window === 'undefined') return false
   return window.innerWidth < 768

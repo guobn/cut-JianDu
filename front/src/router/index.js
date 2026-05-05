@@ -58,7 +58,7 @@ const routes = [
         path: 'preprocess',
         name: 'Preprocess',
         meta: { title: '图像预处理' },
-        component: () => import('@/views/Preprocess.vue')
+        component: () => import('@/views/preprocess/PreprocessPipeline.vue')
       },
       {
         path: 'metadata',

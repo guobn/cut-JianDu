@@ -4,7 +4,7 @@
       <el-card class="auth-frame auth-frame--vertical" shadow="never" :body-style="{ padding: '0' }">
         <section class="auth-hero">
           <div class="auth-hero__badge">云端账户 · 安全登录</div>
-          <div class="auth-hero__title">基于云存储的简牍图片切割及管理系统的设计与实现</div>
+          <div class="auth-hero__title">基于云存储的简牍图片切割及管理系统</div>
           <div class="auth-hero__desc">
             以科研流程为导向，支持图像管理、元数据整理与统计分析。登录后可使用鉴权接口与后端能力。
           </div>

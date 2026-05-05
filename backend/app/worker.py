@@ -37,4 +37,4 @@ celery_app.conf.update(
 )
 
 # 自动发现任务模块
-celery_app.autodiscover_tasks(["app.services.celery_tasks"])
+celery_app.autodiscover_tasks(["app.services.celery_tasks", "app.services.preprocess_tasks"])

@@ -5,7 +5,7 @@
         <el-icon :size="18"><Memo /></el-icon>
       </div>
       <div class="header__brand">
-        <div class="header__brand-title">基于云存储的简牍图片切割及管理系统的设计与实现</div>
+        <div class="header__brand-title">基于云存储的简牍图片切割及管理系统</div>
         <div class="header__brand-subtitle">Ancient Script Analysis System</div>
       </div>
     </div>

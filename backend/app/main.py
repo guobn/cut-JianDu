@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.routers.ping import router as ping_router
 from app.api.routes import user
-from app.api import images, segmentation, rotation, normalization, metadata, tasks, test, groups, cache, recognition
+from app.api import images, segmentation, rotation, normalization, metadata, tasks, test, groups, cache, recognition, preprocess
 from app.config import settings
 
 app = FastAPI(
@@ -51,6 +51,7 @@ app.include_router(metadata.router)
 # 注册图像组和缓存路由
 app.include_router(groups.router)
 app.include_router(cache.router)
+app.include_router(preprocess.router)
 
 # 注册 recognition 批量检测路由
 app.include_router(recognition.router)

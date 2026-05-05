@@ -300,3 +300,60 @@ class RotationService:
             updated_boxes.append(bbox)
         
         return rotated, updated_boxes
+
+
+def estimate_skew_angle(image_path: str) -> Tuple[float, float]:
+    image = ImageProcessor.load_image(image_path)
+    enhanced = ImageProcessor.enhance_for_detection(image, detection_type='rotation')
+    gray = ImageProcessor.convert_to_grayscale(enhanced)
+    edges = cv2.Canny(gray, 50, 150)
+
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=80,
+        minLineLength=max(40, min(gray.shape[:2]) // 4),
+        maxLineGap=12,
+    )
+
+    if lines is None or len(lines) == 0:
+        return 0.0, 0.0
+
+    weighted_angles = []
+    weights = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            continue
+        angle = float(np.degrees(np.arctan2(dy, dx)))
+        while angle <= -90:
+            angle += 180
+        while angle > 90:
+            angle -= 180
+        if abs(angle) >= 60:
+            continue
+        length = float(np.hypot(dx, dy))
+        if length <= 0:
+            continue
+        weighted_angles.append(angle)
+        weights.append(length)
+
+    if not weighted_angles:
+        return 0.0, 0.0
+
+    angles = np.array(weighted_angles, dtype=np.float32)
+    weights_array = np.array(weights, dtype=np.float32)
+    order = np.argsort(angles)
+    sorted_angles = angles[order]
+    sorted_weights = weights_array[order]
+    cumulative = np.cumsum(sorted_weights)
+    midpoint = sorted_weights.sum() / 2.0
+    median_index = int(np.searchsorted(cumulative, midpoint))
+    median_angle = float(sorted_angles[min(median_index, len(sorted_angles) - 1)])
+
+    std_dev = float(np.sqrt(np.average((angles - median_angle) ** 2, weights=weights_array)))
+    confidence = float(np.clip(1.0 - (std_dev / 15.0), 0.0, 1.0))
+    return median_angle, confidence

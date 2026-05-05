@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import Optional
 import os
 
@@ -7,7 +7,7 @@ import os
 class Settings(BaseSettings):
     """应用配置"""
     # 基础配置
-    app_name: str = "基于云存储的简牍图片切割及管理系统的设计与实现"
+    app_name: str = "基于云存储的简牍图片切割及管理系统"
     app_version: str = "1.0.0"
     debug: bool = True
     env: str = "dev"
@@ -60,6 +60,19 @@ class Settings(BaseSettings):
     # Celery 配置（异步任务队列）
     celery_broker_url: str = "redis://default:123456gbn@14.103.152.219:6379/0"
     celery_result_backend: str = "redis://default:123456gbn@14.103.152.219:6379/0"
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def normalize_debug_flag(cls, value):
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug", "dev", "development"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
+        return value
 
     class Config:
         env_file = ".env"

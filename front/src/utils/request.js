@@ -22,5 +22,17 @@ request.interceptors.request.use(async (config) => {
   return config
 })
 
+request.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const detail = error?.response?.data?.detail
+    const message = Array.isArray(detail) ? detail.map((item) => item?.msg || String(item)).join('; ') : detail
+    if (message) {
+      error.message = message
+    }
+    return Promise.reject(error)
+  }
+)
+
 export default request
 export { request }
